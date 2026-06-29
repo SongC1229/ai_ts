@@ -15,7 +15,6 @@
     self.srt_path_edit, self.video_path_edit, self.output_dir_edit
     self._src_title_label, self._btn_switch_src, self.src_count_label, self.src_table
     self.settings, self._pipeline_running
-    self._ref_audio_activated, self._mix_audio_activated
     self._last_output_path, self._last_srt_path
 
 方法:
@@ -61,24 +60,6 @@ class PipelineMixin:
                 self.raw_tts_paths[row] = raw_path
         key = "mixed" if status == "mixed_done" else status
         self._set_status(row, key)
-
-    def _on_ref_audio_ready(self, idx: int, ref_path: str):
-        """原始参考音频就绪,激活全列原音播放按钮（仅首次生效)"""
-        if getattr(self, '_ref_audio_activated', False):
-            return
-        cm = self._get_cache()
-        vocals_path = cm.vocals_path if cm else ""
-        if ref_path or (vocals_path and os.path.exists(vocals_path)):
-            self._ref_audio_activated = True
-
-    def _on_mix_audio_ready(self, idx: int, mix_path: str):
-        """原始混合音频片段就绪,激活全列原声混音播放按钮（仅首次生效)"""
-        if getattr(self, '_mix_audio_activated', False):
-            return
-        cm = self._get_cache()
-        mix_orig_path = cm.mix_orig_path if cm else ""
-        if mix_path or (mix_orig_path and os.path.exists(mix_orig_path)):
-            self._mix_audio_activated = True
 
     def _on_subs_ready(self, subs: list):
         """字幕处理完成 — 直接替换模型数据"""

@@ -144,8 +144,6 @@ class PipelineWorker(_WorkerErrorMixin, QThread):
     # ── 全长流水线专用信号 ──
     subs_calib_gender_ready = Signal(list)
     calib_src_ready = Signal(list)
-    ref_audio_ready = Signal(int, str)
-    mix_audio_ready = Signal(int, str)
     tts_cache_hit = Signal(int)
     mix_item_ready = Signal(list)
     mixed_audio_ready = Signal(str)
@@ -176,8 +174,6 @@ class PipelineWorker(_WorkerErrorMixin, QThread):
         )
         self.ctx.on_subs_ready = lambda subs: self.subs_calib_gender_ready.emit(subs)
         self.ctx.on_raw_subs_ready = lambda raw_subs: self.calib_src_ready.emit(raw_subs)
-        self.ctx.on_audio_ready = lambda path: self.mix_audio_ready.emit(0, path)
-        self.ctx.on_vocals_ready = lambda path: self.ref_audio_ready.emit(0, path)
         self.ctx.on_mix_done = lambda path: self.mixed_audio_ready.emit(path)
         self.ctx.progress_cb = self._on_progress_step
         orch = PipelineOrchestrator(self.ctx, tts_item_cb=tts_cb, mix_item_cb=mix_cb)

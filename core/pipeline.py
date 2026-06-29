@@ -93,8 +93,6 @@ class PipelineContext:
         self.progress_cb = None          # 进度回调 (step_idx, pct, text)
         self.on_subs_ready = None        # 回调(subs) — 字幕处理完成后调用
         self.on_raw_subs_ready = None    # 回调(raw_subs) — 原声字幕就绪
-        self.on_audio_ready = None       # 回调(path) — 音频就绪
-        self.on_vocals_ready = None      # 回调(path) — 人声就绪
         self.on_mix_done = None          # 回调(path) — 混音完成
         self.tts_segments = []          # [(start_ms, end_ms, mixed_clip_path), ...]
         self.final_audio_path = ""      # 最终音频
@@ -197,8 +195,6 @@ class ExtractAudioStep(BaseStep):
         status = self.check_cache(ctx)
         if status == CacheStatus.FULL:
             ctx.audio_path = ctx.cache.get_path(Step.EXTRACT, "mix_orig.wav")
-            if ctx.on_audio_ready:
-                ctx.on_audio_ready(ctx.audio_path)
             if ctx.sample_rate is None:
                 ctx.sample_rate = ctx.cache.get_meta("sample_rate")
             if ctx.sample_rate is None:
@@ -220,8 +216,6 @@ class ExtractAudioStep(BaseStep):
         ]
         self._run_ffmpeg(cmd, ctx, "提取音频", "(0/1)")
         ctx.audio_path = output
-        if ctx.on_audio_ready:
-            ctx.on_audio_ready(output)
         ctx.cache.set_meta("sample_rate", ctx.sample_rate)
         self.mark_completed(ctx)
         self._progress(ctx, 100)
@@ -254,8 +248,6 @@ class SeparateVocalsStep(BaseStep):
         if status == CacheStatus.FULL:
             ctx.vocals_path = ctx.cache.get_path(Step.DEMUCS, "vocals_orig.wav")
             ctx.bg_path = ctx.cache.get_path(Step.DEMUCS, "background.wav")
-            if ctx.on_vocals_ready:
-                ctx.on_vocals_ready(ctx.vocals_path)
             self._progress(ctx, 100)
             return
 
@@ -320,8 +312,6 @@ class SeparateVocalsStep(BaseStep):
 
         ctx.vocals_path = out_vp
         ctx.bg_path = out_nvp
-        if ctx.on_vocals_ready:
-            ctx.on_vocals_ready(out_vp)
         self.mark_completed(ctx)
         self._progress(ctx, 100)
 

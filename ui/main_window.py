@@ -90,8 +90,6 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self._pipeline_running = False  # 管线运行时跳过缓存检查
         self._tts_cache_hits = {}       # idx -> True 已确认缓存命中,避免重复检查
         self._tts_error_dlg = None      # 当前显示的 TTS 错误弹窗（非模态)
-        self._src_audio_path = ""     # Demucs分离后的全长人声文件路径
-        self._mix_audio_path = ""     # 原始全长混合音频文件路径
         self.tts_paths = {}          # row_index -> tts_file_path (mixed_clip)
         self.raw_tts_paths = {}      # row_index -> raw_tts_file_path (before mixing)
         self.subtitle_row_map = {}   # subtitle_1based_index -> table_row
@@ -734,10 +732,6 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             if self._wave_cancel is not None:
                 self._wave_cancel.set()
             self._cache = None  # 视频路径变化,失效缓存实例
-            self._src_audio_path = ""   # 清除旧视频的人声缓存路径
-            self._mix_audio_path = ""   # 清除旧视频的混合音频缓存路径
-            self._ref_audio_activated = False
-            self._mix_audio_activated = False
             if not self.output_dir_edit.text():
                 self.output_dir_edit.blockSignals(True)
                 self.output_dir_edit.setText(str(Path(path).parent))

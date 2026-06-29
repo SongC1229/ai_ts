@@ -59,6 +59,41 @@ def write_wav_np(path: str, y, sr: int):
     sf.write(path, y, sr, subtype='PCM_16')
 
 
+def read_wav_segment(path: str, start_ms: int, end_ms: int = None, mono: bool = True):
+    """从 WAV 文件读取指定毫秒区间的音频, 返回 (float64 array, sample_rate)"""
+    import numpy as np
+    import soundfile as sf
+    with sf.SoundFile(path) as f:
+        sr = f.samplerate
+        total_frames = len(f)
+        start_frame = int(start_ms * sr / 1000)
+        end_frame = int(end_ms * sr / 1000) if end_ms else total_frames
+        start_frame = max(0, min(start_frame, total_frames))
+        end_frame = max(start_frame, min(end_frame, total_frames))
+        if end_frame <= start_frame:
+            return None, sr
+        f.seek(start_frame)
+        y = f.read(end_frame - start_frame, dtype='float64')
+        if mono and y.ndim > 1:
+            y = np.mean(y, axis=1)
+        return y, sr
+
+
+def downsample_waveform(y, duration_ms: int, target_n: int = 200, max_duration_ms: int = 0) -> list:
+    """将音频数据降采样为波形峰值 (用于 UI 显示)"""
+    import numpy as np
+    if len(y) == 0:
+        return []
+    n = min(target_n, len(y))
+    chunk = len(y) // n
+    peaks = []
+    for i in range(0, len(y) - chunk + 1, chunk):
+        peaks.append(float(np.max(np.abs(y[i:i + chunk]))))
+    if len(peaks) < target_n and len(y) > 0:
+        peaks.append(float(np.max(np.abs(y[-chunk:]))))
+    return peaks[:target_n]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 设备检测（程序生命周期内只检测一次)
 # ══════════════════════════════════════════════════════════════════════════════

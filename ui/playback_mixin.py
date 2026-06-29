@@ -122,30 +122,25 @@ class PlaybackMixin:
         """播放指定行的 TTS 混合音频（跳过前置100ms扩展背景)"""
         self._play_cached_audio(row, "TTS", start_ms_offset=100, mixed=True)
 
-    def _play_fullfile_audio(self, row: int, path_attr: str, cache_step: str, cache_file: str, label: str):
-        """通用全长文件播放：懒加载路径 → seek 区间播放"""
+    def _play_fullfile_audio(self, row: int, path: str, label: str):
+        """通用全长文件播放：获取路径 → seek 区间播放"""
+        if not path or not os.path.exists(path):
+            self.log(f"【警告】第 {row+1} 行{label}文件不可用")
+            return
         seg = self._subtitle_model.get_times(row)
         if seg == (0, 0):
             self.log(f"【警告】第 {row+1} 行字幕时间区间不可用")
             return
         start_ms, end_ms = seg
-        path = getattr(self, path_attr, "")
-        if not path:
-            cm = self._get_cache()
-            if not cm:
-                self.log("【警告】请先选择视频文件")
-                return
-            path = cm.get_path(cache_step, cache_file)
-            setattr(self, path_attr, path)
         self._play_audio(path, start_ms=start_ms, end_ms=end_ms, label=label, row=row)
 
     def _play_orig_audio(self, row: int):
-        """播放指定行的原人声（全长分离人声文件 seek)"""
-        self._play_fullfile_audio(row, '_src_audio_path', 'demucs', 'vocals_orig.wav', '人声')
+        cm = self._get_cache()
+        self._play_fullfile_audio(row, cm.vocals_path if cm else "", "人声")
 
     def _play_mix_audio(self, row: int):
-        """播放指定行的原始混合音频（全长混合文件 seek)"""
-        self._play_fullfile_audio(row, '_mix_audio_path', 'extract', 'mix_orig.wav', '原声')
+        cm = self._get_cache()
+        self._play_fullfile_audio(row, cm.mix_orig_path if cm else "", "原声")
 
     def _play_raw_tts(self, row: int):
         """播放指定行的原始TTS（混音前)"""
@@ -170,13 +165,12 @@ class PlaybackMixin:
             start_ms, end_ms = sub.eff_start_ms, sub.eff_end_ms
         else:
             start_ms, end_ms = sub.start_ms, sub.end_ms
-        if not self._src_audio_path:
-            cm = self._get_cache()
-            if not cm:
-                self.log("【警告】请先选择视频文件")
-                return
-            self._src_audio_path = cm.vocals_path
-        self._play_audio(self._src_audio_path, start_ms=start_ms, end_ms=end_ms, label="SRC 人声", row=row)
+        cm = self._get_cache()
+        vocals_path = cm.vocals_path if cm else ""
+        if not vocals_path or not os.path.exists(vocals_path):
+            self.log("【警告】人声文件不可用")
+            return
+        self._play_audio(vocals_path, start_ms=start_ms, end_ms=end_ms, label="SRC 人声", row=row)
 
     def _play_ref_file(self, gender: str):
         """试听固定提示音"""
