@@ -6,18 +6,15 @@
     self.btn_start, self.btn_cancel, self.btn_play_mix, self.btn_open_output
     self.btn_stop_mix
     self.prompt_mode_original, self.prompt_mode_fixed
-    self.lbl_mix_status, self.lbl_play_time
     self.waveform_preview
     self._step_cells, self._step_progress_bar, self._step_progress_label, self._step_progress_pct
     self.step_names
     self._subtitle_model, self._src_model, self._gender_proxy
     self.subtitle_row_map, self._row_to_idx
-    self.tts_paths, self.orig_paths, self.mix_paths, self.raw_tts_paths
     self._tts_cache_hits, self.current_subtitles, self._segments_data
     self.srt_path_edit, self.video_path_edit, self.output_dir_edit
     self._src_title_label, self._btn_switch_src, self.src_count_label, self.src_table
     self.settings, self._pipeline_running
-    self._mixed_audio_path
     self._ref_audio_activated, self._mix_audio_activated
     self._last_output_path, self._last_srt_path
 
@@ -72,9 +69,6 @@ class PipelineMixin:
         cm = self._get_cache()
         vocals_path = cm.vocals_path if cm else ""
         if ref_path or (vocals_path and os.path.exists(vocals_path)):
-            path = ref_path or vocals_path
-            for r in range(self._subtitle_model.rowCount()):
-                self.orig_paths[r] = path
             self._ref_audio_activated = True
 
     def _on_mix_audio_ready(self, idx: int, mix_path: str):
@@ -84,9 +78,7 @@ class PipelineMixin:
         cm = self._get_cache()
         mix_orig_path = cm.mix_orig_path if cm else ""
         if mix_path or (mix_orig_path and os.path.exists(mix_orig_path)):
-            path = mix_path or mix_orig_path
-            for r in range(self._subtitle_model.rowCount()):
-                self.mix_paths[r] = path
+            self._mix_audio_activated = True
 
     def _on_subs_ready(self, subs: list):
         """字幕处理完成 — 直接替换模型数据"""
@@ -172,9 +164,6 @@ class PipelineMixin:
 
     def _on_mixed_audio_ready(self, mixed_path: str):
         """混音完成,激活预览"""
-        self._mixed_audio_path = mixed_path
-        self.lbl_mix_status.setText("✅ 混音已就绪,点击播放试听效果")
-        self.btn_play_mix.setEnabled(True)
         self.waveform_preview.setEnabled(True)
         self._load_waveform_preview(mixed_path)
         self.log(f"混音预览就绪: {os.path.basename(mixed_path)}")
@@ -250,26 +239,6 @@ class PipelineMixin:
         else:
             self.log(f"⛔⛔ {msg}")
         self._update_cache_status()
-
-    def _on_subtitle_status(self, idx: int, status: str):
-        """更新字幕状态列"""
-        row = self.subtitle_row_map.get(idx)
-        if row is None:
-            return
-        self._subtitle_model.set_status(row, status)
-        if status == "skipped":
-            self._subtitle_model.update_gender(idx, "")
-            cm = self._get_cache()
-            vocals_path = cm.vocals_path if cm else ""
-            if vocals_path and os.path.exists(vocals_path):
-                for r in range(self._subtitle_model.rowCount()):
-                    self.orig_paths[r] = vocals_path
-            mix_orig_path = cm.mix_orig_path if cm else ""
-            if mix_orig_path and os.path.exists(mix_orig_path):
-                for r in range(self._subtitle_model.rowCount()):
-                    self.mix_paths[r] = mix_orig_path
-        elif status == "mixed":
-            pass
 
     def _on_subtitle_error(self, idx: int, error_msg: str, text: str):
         """TTS 错误时弹出非模态对话框"""
@@ -416,9 +385,7 @@ class PipelineMixin:
                     self._set_status(row, "tts_done")
                     continue
             self._set_status(row, "pending")
-        self.btn_play_mix.setEnabled(False)
         self.btn_stop_mix.setEnabled(False)
-        self.lbl_mix_status.setText("混音预览")
         self.lbl_play_time.setText("00:00 / 00:00")
         for icon, text, _ in self._step_cells:
             icon.setText("⏳")

@@ -93,9 +93,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self._src_audio_path = ""     # Demucs分离后的全长人声文件路径
         self._mix_audio_path = ""     # 原始全长混合音频文件路径
         self.tts_paths = {}          # row_index -> tts_file_path (mixed_clip)
-        self.orig_paths = {}         # row_index -> original_audio_file_path
         self.raw_tts_paths = {}      # row_index -> raw_tts_file_path (before mixing)
-        self.mix_paths = {}          # row_index -> mix_orig.wav 全长混合音频路径
         self.subtitle_row_map = {}   # subtitle_1based_index -> table_row
         self._row_to_idx = {}      # table_row -> subtitle_1based_index
         self._gender_click_count = {}  # idx -> 性别点击计数
@@ -620,14 +618,14 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         preview_audio_layout = QVBoxLayout(preview_audio_group)
         preview_audio_layout.setSpacing(3)
         mix_row = QHBoxLayout()
-        self.lbl_mix_status = QLabel("混音完成后可预览配音效果")
-        mix_row.addWidget(self.lbl_mix_status, 1)
         self.btn_play_mix = QPushButton("▶ 播放混音")
-        self.btn_play_mix.setEnabled(False)
+        self.btn_play_mix.setFixedWidth(100)
         mix_row.addWidget(self.btn_play_mix)
         self.btn_stop_mix = QPushButton("⏹ 停止")
+        self.btn_stop_mix.setFixedWidth(100)
         self.btn_stop_mix.setEnabled(False)
         mix_row.addWidget(self.btn_stop_mix)
+        mix_row.addStretch()
         preview_audio_layout.addLayout(mix_row)
         play_row = QHBoxLayout()
         self.lbl_play_time = QLabel("00:00.000 / 00:00.000")
@@ -669,7 +667,6 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         content_grid.addWidget(self.src_group, 1, 0)
         main_layout.addWidget(self._content_widget)
         content_layout.addLayout(content_grid)
-        self._mixed_audio_path = None
         self._regen_queue = []
         self._segments_data = []  # [(start_ms, end_ms), ...] 语音片段区间
         self._waveform_offset = 0  # ms, 区间波形时偏移量
@@ -757,15 +754,12 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self.subtitle_row_map.clear()
         self.btn_open_output.setEnabled(False)
         self._last_output_path = ""
-        self._mixed_audio_path = None
         self.reset_preview_buttons()
         self._src_model.clear_data()
         self.src_count_label.setText("原声字幕: 0")
         self.waveform_preview.set_waveform([], 1)
         self.waveform_preview.set_position(0)
         self.waveform_preview.setEnabled(False)
-        self.lbl_mix_status.setText("")
-        self.btn_play_mix.setEnabled(False)
         vid_dir = str(Path(video_path).parent)
         vid_stem = Path(video_path).stem.split('.')[0]
         candidates = [os.path.join(vid_dir, f"{vid_stem}.srt")] + glob.glob(os.path.join(vid_dir, f"{vid_stem}.*.srt"))
@@ -962,25 +956,6 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             self._tts_scanner.done.connect(_on_scan_done)
             self._tts_scanner.start()
 
-        # ── 音频路径设置（同步）──
-        # 设置音频路径
-        if has_demucs_vocals:
-            for r in range(self._subtitle_model.rowCount()):
-                self.orig_paths[r] = demucs_vocals_path
-            if has_extract_mix:
-                for r in range(self._subtitle_model.rowCount()):
-                    self.mix_paths[r] = extract_mix_path
-            # 混音缓存已就绪 → 激活播放按钮
-            mix_path = cm.get_path(Step.MIX, "final_audio.wav")
-            if os.path.exists(mix_path):
-                self._mixed_audio_path = mix_path
-                self.btn_play_mix.setEnabled(True)
-                self.waveform_preview.setEnabled(True)
-                self.lbl_mix_status.setText("✅ 混音已就绪,点击播放试听效果")
-                # 仅对短文件（<30min)预加载波形,大文件第一次播放时才加载
-                _size = os.path.getsize(mix_path)
-                if _size < 300 * 1024 * 1024:  # 300MB ≈ 30min stereo 48kHz
-                    QTimer.singleShot(0, lambda p=mix_path: self._load_waveform_preview(p))
         self._update_cache_status()
 
     def _on_precise_waveform_needed(self, file_path: str, start_ms: int, end_ms: int):
@@ -1182,7 +1157,9 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             return
         # 点击开始时间列 → 播放混音
         if col == COL_START:
-            if not self._mixed_audio_path or not os.path.exists(self._mixed_audio_path):
+            cm = self._get_cache()
+            mix_path = cm.final_mix_path if cm else ""
+            if not os.path.exists(mix_path):
                 self.log(f"【警告】第 {row+1} 行 全长混音不可用")
                 return
             seg = self._subtitle_model.get_times(row)
@@ -1190,16 +1167,13 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
                 self.log(f"【警告】第 {row+1} 行字幕时间区间不可用")
                 return
             start_ms, end_ms = seg
-            # Step 6 拼接时将混音片段放在 start_ms - edge_ms 处,
-            # 所以播放时也提前 edge_ms 才能听到完整内容
             _edge = cfg.edge_ms
-            self._play_audio(self._mixed_audio_path, start_ms=max(0, start_ms - _edge))
+            self._play_audio(mix_path, start_ms=max(0, start_ms - _edge))
             dur_s = (end_ms - start_ms) / 1000
             self.log(f"▶ 全长混音: 第{row+1}行 ({dur_s:.1f}s)")
             self.waveform_preview.setEnabled(True)
-            # 异步加载全长波形（大文件可能慢几秒)
             self.log("⏳ 正在加载全长波形...")
-            self._load_waveform_preview(self._mixed_audio_path)
+            self._load_waveform_preview(mix_path)
             return
         # 点击性别列切换
         if col != COL_GENDER:

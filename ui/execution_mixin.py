@@ -8,9 +8,7 @@
     self.waveform_preview
     self.video_path_edit, self.srt_path_edit, self.output_dir_edit
     self.src_srt_path_edit, self.keep_temp_cb
-    self.lbl_mix_status
-    self.settings, self.tts_paths, self.orig_paths, self.mix_paths, self.raw_tts_paths
-    self._mixed_audio_path, self._pipeline_running
+    self._pipeline_running
     self.current_subtitles, self._subtitle_model
     self._row_to_idx, self.subtitle_row_map
     self._log_signal
@@ -88,10 +86,7 @@ class ExecutionMixin:
             return
 
         self.tts_paths.clear()
-        self.orig_paths.clear()
-        self.mix_paths.clear()
         self.raw_tts_paths.clear()
-        self._mixed_audio_path = None
         self.reset_preview_buttons()
         self.waveform_preview.set_waveform([], 1)
         self.waveform_preview.set_position(0)
@@ -122,7 +117,6 @@ class ExecutionMixin:
         self._fix_srt_generated = False  # 重置,允许新流程生成校正字幕
         self._pipeline_worker.start()
 
-        self.lbl_mix_status.setText("正在处理...")
         self.log("===== 开始配音任务 =====")
         self.log(f"视频: {Path(video_path).name}")
         self.log(f"字幕: {Path(srt_path).name}")

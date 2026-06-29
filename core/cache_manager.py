@@ -210,6 +210,11 @@ class CacheManager:
     def mixed_path(self, sub) -> str:
         return self.get_path(Step.TTS, f"mixed_{sub.idx:04d}_{_fmt_ts(sub.eff_start_ms)}-{_fmt_ts(sub.eff_end_ms)}.wav")
 
+    @property
+    def final_mix_path(self) -> str:
+        """全长混音文件路径"""
+        return self.get_path(Step.MIX, "final_audio.wav")
+
     def file_info(self, step_name: str, filename: str) -> tuple:
         """统一文件检查：返回 (exists, full_path, rel_path)"""
         full = self.get_path(step_name, filename)

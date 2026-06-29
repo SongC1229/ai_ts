@@ -4,7 +4,6 @@
 """
 
 import os
-import wave as _w
 from typing import Optional
 
 import numpy as np

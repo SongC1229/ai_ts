@@ -179,9 +179,7 @@ class PipelineWorker(_WorkerErrorMixin, QThread):
         self.ctx.on_audio_ready = lambda path: self.mix_audio_ready.emit(0, path)
         self.ctx.on_vocals_ready = lambda path: self.ref_audio_ready.emit(0, path)
         self.ctx.on_mix_done = lambda path: self.mixed_audio_ready.emit(path)
-        def progress_cb(step_idx, pct, text):
-            self._on_progress_step(step_idx, pct, text)
-        self.ctx.progress_cb = progress_cb
+        self.ctx.progress_cb = self._on_progress_step
         orch = PipelineOrchestrator(self.ctx, tts_item_cb=tts_cb, mix_item_cb=mix_cb)
 
         try:

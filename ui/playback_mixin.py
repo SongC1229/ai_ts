@@ -153,8 +153,10 @@ class PlaybackMixin:
 
     def _play_mixed(self):
         """播放混音后的音频"""
-        if self._mixed_audio_path and os.path.exists(self._mixed_audio_path):
-            self._play_audio(self._mixed_audio_path)
+        cm = self._get_cache()
+        path = cm.final_mix_path if cm else ""
+        if path and os.path.exists(path):
+            self._play_audio(path)
         else:
             self.log("【警告】混音音频不可用")
 
@@ -307,7 +309,6 @@ class PlaybackMixin:
         """停止播放并重置 UI"""
         self.player.stop()
         self._play_end_ms = 0
-        self.btn_play_mix.setEnabled(bool(self._mixed_audio_path))
         self.btn_stop_mix.setEnabled(False)
         self.lbl_play_time.setText("00:00 / 00:00")
         self.waveform_preview.set_position(0)
@@ -333,7 +334,6 @@ class PlaybackMixin:
     def _on_player_status(self, status):
         """播放器状态变化"""
         if status == QMediaPlayer.MediaStatus.LoadedMedia:
-            self.btn_play_mix.setEnabled(True)
             self.btn_stop_mix.setEnabled(True)
             # 媒体加载完成才执行 seek（切源时 play() 已调用)
             _seek = self._pending_seek

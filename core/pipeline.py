@@ -98,7 +98,6 @@ class PipelineContext:
         self.on_mix_done = None          # 回调(path) — 混音完成
         self.tts_segments = []          # [(start_ms, end_ms, mixed_clip_path), ...]
         self.final_audio_path = ""      # 最终音频
-        self.final_audio_path = ""      # 最终音频
 
         # ── 统一从 cfg 加载所有配置字段 ──
         _skip = {'__dict__', '__doc__', '__module__', '__init__'}
@@ -227,7 +226,7 @@ class ExtractAudioStep(BaseStep):
         self.mark_completed(ctx)
         self._progress(ctx, 100)
 
-    def _run_ffmpeg(self, cmd: list, label: str, count_suffix: str = ""):
+    def _run_ffmpeg(self, cmd: list, ctx: PipelineContext, label: str, count_suffix: str = ""):
         suffix = f" {count_suffix}" if count_suffix else ""
         self._progress(ctx, 10, f"正在{label}...{suffix}")
         try:

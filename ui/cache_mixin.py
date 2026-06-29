@@ -106,7 +106,6 @@ class CacheMixin:
 
         self.player.stop()
         self.player.setSource(QUrl())
-        self._mixed_audio_path = ""
 
         cm = self._get_cache()
         if not cm:
