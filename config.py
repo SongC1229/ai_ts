@@ -50,7 +50,7 @@ class Cfg:
         self.qwen_batch_size = 8
 
         # ── 字幕区间对齐方式 (第3步) ──
-        self.align_mode = "qwen"   # qwen | whisper
+        self.align_mode = "qwen"   # qwen | whisper | sensevoice
 
         # ── Whisper 转写对齐参数 (align_mode=whisper 时生效) ──
         # Demucs 提纯人声无背景音, VAD 阈值低于默认 0.5 避免耳语/气声被滤掉

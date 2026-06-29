@@ -206,11 +206,26 @@ class ExecutionMixin:
                 self._update_cache_status()
                 self._process_regen_queue()
                 return
+        # 取原声字幕文本（dots prompt_text 用)
+        _prompt_text = ""
+        if hasattr(self, '_src_subs') and self._src_subs:
+            for _s in self._src_subs:
+                if _s.idx == idx:
+                    _prompt_text = _s.text or ""
+                    break
+        # 固定提示音模式：文本来自设置
+        if self.cfg.use_fixed_ref:
+            _prompt_text = self.cfg.fixed_ref_text_female if sub.gender == "female" else self.cfg.fixed_ref_text_male
+
         work_dir = tempfile.mkdtemp(prefix=f"dub_{Path(cache.video_path).stem}_")
+
+        # 把 prompt_text 注入 settings
+        _settings = dict(self.cfg.__dict__)
+        _settings["prompt_text"] = _prompt_text
 
         t = TaskThread(
             target=regen_single_tts,
-            args=[sub, self.cfg.__dict__, cache, work_dir],
+            args=[sub, _settings, cache, work_dir],
             kwargs={'edge_ms': self.cfg.edge_ms},
             log_cb=self._log_signal.emit,
         )

@@ -194,11 +194,12 @@ class SettingsDialog(QDialog):
         calib_form = QFormLayout(calib_group)
 
         self.align_mode_combo = QComboBox()
-        self.align_mode_combo.addItems(["qwen", "whisper"])
+        self.align_mode_combo.addItems(["qwen", "whisper", "sensevoice"])
         self.align_mode_combo.setToolTip(
             "第3步区间矫正方式:\n"
             "qwen = Qwen3 强制对齐 (需原声字幕, 精确)\n"
-            "whisper = faster-whisper 转写对齐 (无需原声字幕, 词级时间戳)")
+            "whisper = faster-whisper 转写对齐 (无需原声字幕, 词级时间戳)\n"
+            "sensevoice = SenseVoiceSmall ASR + VAD 对齐 (无需原声字幕)")
         calib_form.addRow("对齐方式:", self.align_mode_combo)
 
         self.asr_max_pad_spin = QSpinBox()

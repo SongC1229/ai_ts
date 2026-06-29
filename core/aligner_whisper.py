@@ -1,6 +1,6 @@
 """faster-whisper 字幕区间矫正
 
-镜像 qwen_aligner.py 的接口风格: 懒加载 + 用完即卸, 与 Qwen/WavLM 的显存策略一致。
+镜像 aligner_qwen.py 的接口风格: 懒加载 + 用完即卸, 与 Qwen/WavLM 的显存策略一致。
 
 与 Qwen3-ForcedAligner 的区别:
 - Qwen 需要原声字幕文本做「强制对齐」, 无 raw_src_path 时不可用

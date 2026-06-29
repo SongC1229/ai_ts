@@ -350,6 +350,12 @@ class CacheMixin:
         deleted = False
         for pattern in [f"tts_{idx:04d}_*.wav", f"mixed_{idx:04d}_*.wav"]:
             for p in glob.glob(os.path.join(tts_dir, pattern)):
+                # 保护 _ref_ 文件不被误删（虽然 glob 不应匹配到,但双重保险)
+                _bn = os.path.basename(p)
+                if _bn.startswith("_ref_"):
+                    print(f"  [debug] 跳过 _ref_ 保护文件: {_bn}")
+                    continue
+                print(f"  [debug] _delete_tts_segment removing: {_bn}")
                 for _ in range(5):
                     try:
                         os.remove(p)

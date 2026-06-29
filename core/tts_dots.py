@@ -5,7 +5,7 @@
   - 模型: models/dots.tts-soar/ (从 G:/ai/dots_tts_rainfall/models 复制)
 
 用法:
-    from core.dots_tts_engine import tts_synthesize, unload_dots_engine
+    from core.tts_dots import tts_synthesize, unload_dots_engine
 
     wav_data = tts_synthesize("你好世界", ref_audio_path="voice.wav")
     wav_data = tts_synthesize("你好", ref_audio=ref_bytes, target_duration_ms=2000)
@@ -194,7 +194,6 @@ def tts_synthesize(
 
         print(f"  [dots_tts] 参考音频: {ref_path}")
 
-        # 加载模型
         try:
             runtime = load_dots_engine(device=device, dtype=dtype)
         except Exception as e:

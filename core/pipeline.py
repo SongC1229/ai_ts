@@ -419,10 +419,10 @@ class SubStep(BaseStep):
         self._progress(ctx, 0, "原声对齐...")
         ctx.log_ui("  Qwen 开始强制对齐...")
         # 设置 Qwen API 日志回调（写入文件+UI)
-        from .qwen_aligner import set_log_cb as _qwen_set_log
+        from .aligner_qwen import set_log_cb as _qwen_set_log
         _qwen_set_log(ctx.log_ui)
         try:
-            from .qwen_aligner import _load_model as _qwen_load, set_prefer_uv as _qwen_set_uv
+            from .aligner_qwen import _load_model as _qwen_load, set_prefer_uv as _qwen_set_uv
             _qwen_set_uv()
             _qwen_load()
         except Exception as e:
@@ -469,7 +469,7 @@ class SubStep(BaseStep):
         # Phase 2: 批量 Qwen 对齐（占用显存,完后立即释放)
         _t0 = time.time()
         try:
-            from .qwen_aligner import align_batch as _qwen_batch
+            from .aligner_qwen import align_batch as _qwen_batch
             def _fmt(d):
                 return f"{d:+5d}"
             self._diff_h = lambda o,c: _fmt(o - c)  # c<o(更早)→正, c>o(更晚)→负
@@ -595,7 +595,7 @@ class SubStep(BaseStep):
             ctx.log_ui(f"  Qwen 对齐完成: {total} 条中 {len(_aligned)} 条成功校准, {changed_count} 条有变动, 耗时{time.time()-_t0:.1f}s")
         finally:
             # Qwen 对齐完毕,立即释放显存,后续性别检测不占用
-            from .qwen_aligner import unload_model as _qwen_unload
+            from .aligner_qwen import unload_model as _qwen_unload
             _qwen_unload()
             ctx.log_ui("  Qwen 模型已卸载,显存已释放")
 
@@ -635,7 +635,7 @@ class SubStep(BaseStep):
         if total == 0:
             raise RuntimeError("目标字幕为空")
 
-        from . import whisper_aligner as _wa
+        from . import aligner_whisper as _wa
         _wa.set_log_cb(ctx.log_ui or print)
 
         self._progress(ctx, 0, "Whisper 转写...")
@@ -830,6 +830,50 @@ class SubStep(BaseStep):
         has_calib_changes = True  # Whisper 转写成功即视为有效校准
         return has_calib_changes
 
+    # ── SenseVoice 对齐 ────────────────────────────
+
+    def _run_sensevoice_align(self, ctx: PipelineContext, subs) -> bool:
+        """用 SenseVoice ASR 对字幕做转写 + VAD 校准"""
+        import time as _t
+        _t0 = _t.time()
+
+        from .aligner_sensevoice import align_subs
+        from .srt_parser import write_srt as _write_srt
+
+        # 复用 _compute_send_ranges 预计算送检区间 (与 Qwen/Whisper 一致)
+        _send_ranges = SubStep._compute_send_ranges(subs, ctx)
+
+        corrected_times, seg_texts, has_changes = align_subs(
+            subs, ctx.vocals_path, _send_ranges, ctx,
+            progress_cb=lambda d, t: ctx.log_ui(f"  SenseVoice 转写: {d}/{t}"),
+        )
+
+        # 写入原声字幕 ja.srt
+        _ja_entries = []
+        for i, sub in enumerate(subs):
+            cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
+            _txt = seg_texts.get(i, "")
+            _ja_entries.append((cs, ce, _txt))
+        _ja_srt = os.path.join(ctx.cache.cache_dir, f"{Path(ctx.dst_srt_path).stem}.ja.srt")
+        _write_srt(_ja_entries, _ja_srt)
+
+        # 将校准时间和 ASR 文本写入 raw_subs
+        ctx.raw_subs = []
+        for i, sub in enumerate(subs):
+            cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
+            _txt = seg_texts.get(i, "")
+            ctx.raw_subs.append(SubtitleItem(
+                idx=sub.idx + 1,
+                start_ms=sub.start_ms,
+                end_ms=sub.end_ms,
+                text=_txt,
+                calib_start_ms=cs,
+                calib_end_ms=ce,
+            ))
+
+        ctx.log_ui(f"  SenseVoice 对齐完成: {len(corrected_times)} 条, 耗时 {_t.time()-_t0:.1f}s")
+        return True
+
     # ── 共享辅助 ──────────────────────────────────
 
     def _do_alignment(self, ctx: PipelineContext, subs) -> bool:
@@ -838,10 +882,14 @@ class SubStep(BaseStep):
 
         if _align_mode == 'whisper':
             _ret = self._run_whisper_align(ctx, subs)
-            from .whisper_aligner import _load_time, _model_name, _model_device
+            from .aligner_whisper import _load_time, _model_name, _model_device
             if _load_time > 0:
                 ctx.log_ui(f"  faster-whisper-large-v3 {_model_device} float16（load {_load_time:.1f}s）")
             return _ret
+
+        if _align_mode == 'sensevoice':
+            ctx.log_ui("  SenseVoice ASR 转写对齐模式")
+            return self._run_sensevoice_align(ctx, subs)
 
         if ctx.raw_src_path and os.path.exists(ctx.raw_src_path):
             ctx.log_ui(f"  Qwen 对齐原声字幕 {os.path.basename(ctx.raw_src_path)}")
@@ -956,7 +1004,7 @@ class SubStep(BaseStep):
 
         # 在主线程预加载模型
         try:
-            from .wavlm_gender_api import detect_genders_batch as _wavlm_batch, _load_model as _wavlm_load, unload_model as _wavlm_unload
+            from .gender_wavlm import detect_genders_batch as _wavlm_batch, _load_model as _wavlm_load, unload_model as _wavlm_unload
             _wavlm_load()
         except Exception as e:
             ctx.log_ui(f"  ⛔WavLM 模型加载失败: {e},跳过性别检测")
@@ -978,11 +1026,6 @@ class SubStep(BaseStep):
                     _db = get_rms_db(clip)
                     with _skip_lock:
                         _skip_info[i] = _db
-                    if os.path.exists(clip):
-                        try:
-                            os.remove(clip)
-                        except Exception:
-                            pass
                     return i, None
                 return i, clip
             except Exception:
@@ -1163,6 +1206,15 @@ class TTSSynthesisStep(BaseStep):
                     try:
                         tts_cfg = _ctx_to_tts_config(ctx)
                         tts_cfg.api_url = api_url  # 可能被端口分配覆盖
+                        # 从原声字幕取文本作为 dots 的 prompt_text
+                        if tts_cfg.tts_local_mode == "dots":
+                            if tts_cfg.use_fixed_ref:
+                                tts_cfg.prompt_text = ctx.fixed_ref_text_female if sub.gender == "female" else ctx.fixed_ref_text_male
+                            elif hasattr(ctx, 'raw_subs') and ctx.raw_subs:
+                                for _rs in ctx.raw_subs:
+                                    if _rs.idx == sub.idx:
+                                        tts_cfg.prompt_text = _rs.text or ""
+                                        break
                         tts_path = synthesize_tts_segment(
                             sub,
                             cache=ctx.cache, work_dir=ctx.work_dir,
@@ -1542,6 +1594,7 @@ class TTSConfig:
     fixed_ref_audio_male: str = ""
     fixed_ref_audio_female: str = ""
     vocals_path: str = ""
+    prompt_text: str = ""                   # 原声字幕文本(dots 续读对齐用)
     # dots.tts 参数
     dots_num_steps: int = 10
     dots_guidance_scale: float = 1.2
@@ -1563,6 +1616,7 @@ class TTSConfig:
             fixed_ref_audio_male=ctx.fixed_ref_audio_male,
             fixed_ref_audio_female=ctx.fixed_ref_audio_female,
             vocals_path=ctx.vocals_path,
+            prompt_text=getattr(ctx, 'prompt_text', ''),
             dots_num_steps=getattr(ctx, 'dots_num_steps', 10),
             dots_guidance_scale=getattr(ctx, 'dots_guidance_scale', 1.2),
             dots_speaker_scale=getattr(ctx, 'dots_speaker_scale', 1.5),
@@ -1588,6 +1642,7 @@ class TTSConfig:
             fixed_ref_audio_male=d.get("fixed_ref_audio_male", _defaults.fixed_ref_audio_male),
             fixed_ref_audio_female=d.get("fixed_ref_audio_female", _defaults.fixed_ref_audio_female),
             vocals_path=d.get("vocals_path", _defaults.vocals_path),
+            prompt_text=d.get("prompt_text", _defaults.prompt_text),
             dots_num_steps=d.get("dots_num_steps", _defaults.dots_num_steps),
             dots_guidance_scale=d.get("dots_guidance_scale", _defaults.dots_guidance_scale),
             dots_speaker_scale=d.get("dots_speaker_scale", _defaults.dots_speaker_scale),
@@ -1671,15 +1726,28 @@ def synthesize_tts_segment(
     if tts_cfg.use_local_tts:
         # 本地 TTS 引擎（indextts / dots)
         if tts_cfg.tts_local_mode == "dots":
-            from .dots_tts_engine import tts_synthesize as _local_tts
+            # 切换 dots 前卸载 IndexTTS2
+            try:
+                from .tts_indextts2 import unload_tts_engine as _unload_indextts
+                _unload_indextts()
+            except Exception:
+                pass
+            from .tts_dots import tts_synthesize as _local_tts
             _local_kw = dict(
                 num_steps=tts_cfg.dots_num_steps,
                 guidance_scale=tts_cfg.dots_guidance_scale,
                 speaker_scale=tts_cfg.dots_speaker_scale,
                 dtype=tts_cfg.dots_precision,
+                prompt_text=tts_cfg.prompt_text,
             )
         else:
-            from .tts_engine import tts_synthesize as _local_tts
+            # 切换 indextts 前卸载 dots
+            try:
+                from .tts_dots import unload_dots_engine as _unload_dots
+                _unload_dots()
+            except Exception:
+                pass
+            from .tts_indextts2 import tts_synthesize as _local_tts
             _local_kw = {}
 
         _target_ms = end_ms - start_ms + 500  # 多生成一点余量,VAD 修剪后不会截断
@@ -2386,10 +2454,8 @@ def regen_single_tts(
         # 注：交叉淡变宽度在重新拼接(remix_from_cache)时由 splice 实际计算并打印,
         # 此处单条片段尚未拼接、无法预知真实淡变,故不再输出易误解的 mix 偏移行。
 
-        # 清理临时文件（含 synthesize 创建的 ref_audio)
-        # 清理临时文件
-        ref_audio = cache.ref_path(sub)
-        for tmp in [vocals_ref, aligned_path, gain_path, padded_path, ref_audio]:
+        # 清理临时文件（不含 _ref_ 参考音频,保留供下次复用)
+        for tmp in [vocals_ref, aligned_path, gain_path, padded_path]:
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)

@@ -5,7 +5,7 @@
 - 内部由 _load_impl() 子类化实现各自加载逻辑
 
 设计目标：
-1. 消除 wavlm_gender_api.py 与 qwen_aligner.py 之间重复的
+1. 消除 gender_wavlm.py 与 aligner_qwen.py 之间重复的
    `_model = None / _load_model() / unload_model()` 三段式样板
 2. 统一显存释放策略（move_to_cpu + del + gc.collect + cuda.empty_cache)
 3. 保留每个模型的兼容入口函数（子类暴露 load_model / unload_model)
