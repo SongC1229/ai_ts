@@ -1,0 +1,54 @@
+# 缓存
+.dub_cache/
+.codegraph/
+.reasonix/
+.mtk_custom/
+*.bak
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 媒体/素材
+*.mp4
+*.srt
+*.wav
+*.mp3
+temp/
+reasonix.toml
+tts_test_server.py
+pppe-080_2min.zip
+pretrained_models/
+*.onnx
+
+# 外部依赖
+qwen3-forced-aligner/
+.cache
+
+# 模型权重（太大不入仓）
+models/
+qwen_api/uv.lock
+
+# 训练目录（数据/日志/checkpoint）
+training/data/
+training/checkpoints/
+training/logs/
+
+# 性别分类训练
+training_gender_cls/checkpoints/
+training_gender_cls/logs/
