@@ -1,19 +1,13 @@
 """SenseVoice 字幕对齐 — ASR 转写生成原声字幕文本
 
-流程:
-  1. 对每条字幕,使用 _compute_send_ranges 预计算的扩展窗口提取音频
-  2. SenseVoiceSmall ASR 识别文字
-  3. FSMN VAD 检测语音起止区间用于时间校准
-  4. 更新字幕文本 + 校准时间
-
-与 Qwen/Whisper 共享同一套送检区间规则 (max_pad=500ms, safe_gap=200ms)。
+与 Qwen/Whisper 共享同一套规则: _compute_send_ranges 计算送检区间,
+_extract_audio_clips 统一提取音频片段, calibrate_times 统一校准。
 """
 
 import os
 import re
-import time
 
-import core.editdistance_fallback  # noqa: F401 (editdistance 纯 Python 回退)
+import core.editdistance_fallback  # noqa: F401
 
 _TAG_PATTERN = re.compile(r"<\|[^|]+\|>")
 _asr_model = None
@@ -27,112 +21,84 @@ def _get_models():
         _asr_model = AutoModel(
             model=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "models", "SenseVoiceSmall"),
-            trust_remote_code=False,
-            disable_update=True,
-            device="cuda:0",
+            trust_remote_code=False, disable_update=True, device="cuda:0",
         )
     if _vad_model is None:
+        _vad_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "models", "fsmn-vad")
         from funasr import AutoModel
         _vad_model = AutoModel(
-            model="fsmn-vad",
-            trust_remote_code=False,
-            disable_update=True,
-            device="cuda:0",
+            model=_vad_dir, trust_remote_code=False, disable_update=True, device="cuda:0",
         )
     return _asr_model, _vad_model
 
 
-def align_subs(subs, vocals_path: str, send_ranges: list, ctx, progress_cb=None):
-    """用 SenseVoice + FSMN VAD 对字幕做 ASR 转写 + VAD 校准
+def align_subs(subs, clip_paths: dict, send_ranges: list, ctx, progress_cb=None):
+    """SenseVoice ASR + FSMN VAD 对齐
 
     Args:
-        subs: 字幕列表 (SubtitleItem)
-        vocals_path: 人声音频路径
+        subs: 字幕列表
+        clip_paths: {sub.idx: clip_path} 预提取的送检音频
         send_ranges: _compute_send_ranges 输出
         ctx: PipelineContext
-        progress_cb: (done, total) 进度回调
-
+        progress_cb: (done, total)
     Returns:
         (corrected_times, seg_texts, has_changes)
     """
-    from core.audio_tools import split_audio_np
+    import warnings
+    warnings.filterwarnings('ignore')
 
     asr_model, vad_model = _get_models()
     total = len(subs)
     corrected_times = {}
     seg_texts = {}
     changed_count = 0
-    work_dir = getattr(ctx, 'work_dir', os.path.join(os.getcwd(), "tmp"))
 
     for i, sub in enumerate(subs):
         if progress_cb:
             progress_cb(i + 1, total)
-
-        orig_s = sub.start_ms
-        orig_e = sub.end_ms
-        idx = sub.idx
-
+        orig_s, orig_e = sub.start_ms, sub.end_ms
         win_s, win_e, _left_pad, _right_pad = send_ranges[i]
-
-        seg_path = os.path.join(work_dir, f"_sensev_{idx:04d}.wav")
-        try:
-            split_audio_np(vocals_path, win_s, win_e, seg_path)
-        except Exception:
-            seg_texts[idx] = ""
-            corrected_times[idx] = (orig_s, orig_e)
-            continue
-
-        if not os.path.exists(seg_path):
-            seg_texts[idx] = ""
-            corrected_times[idx] = (orig_s, orig_e)
+        seg_path = clip_paths.get(sub.idx)
+        if not seg_path or not os.path.exists(seg_path):
+            corrected_times[i], seg_texts[i] = (orig_s, orig_e), ""
             continue
 
         # ASR
         try:
             result = asr_model.generate(
-                input=seg_path, language="auto",
-                ban_emo_unk=True, use_itn=False,
-            )
+                input=seg_path, language="auto", ban_emo_unk=True, use_itn=False)
         except Exception:
-            seg_texts[idx] = ""
-            corrected_times[idx] = (orig_s, orig_e)
+            corrected_times[i], seg_texts[i] = (orig_s, orig_e), ""
             continue
-
         text = _TAG_PATTERN.sub("", str(result[0].get("text", ""))).strip() if result else ""
-        seg_texts[idx] = text
+        seg_texts[i] = text
 
-        # FSMN VAD (返回值 ms)
-        cs, ce = orig_s, orig_e
+        # FSMN VAD (需 16kHz, 显式降采样)
+        vad_s, vad_e = orig_s, orig_e
         try:
-            vad_result = vad_model.generate(input=seg_path)
-            if vad_result and 'value' in vad_result[0]:
-                segs = vad_result[0]['value']  # [[start_ms, end_ms], ...]
-                if segs:
-                    cs = win_s + segs[0][0]
-                    ce = win_s + segs[-1][1]
+            import soundfile as _sf, librosa as _lr
+            _data, _sr = _sf.read(seg_path)
+            if _sr != 16000:
+                _d16 = _lr.resample(_data, orig_sr=_sr, target_sr=16000)
+                _p16 = seg_path.replace('.wav', '_16k.wav')
+                _sf.write(_p16, _d16, 16000)
+                _vr = vad_model.generate(input=_p16)
+                try: os.remove(_p16)
+                except: pass
+            else:
+                _vr = vad_model.generate(input=seg_path)
+            if _vr and 'value' in _vr[0]:
+                _segs = [s for s in _vr[0]['value'] if s[1] - s[0] >= 100]
+                if _segs:
+                    vad_s, vad_e = win_s + _segs[0][0], win_s + _segs[-1][1]
         except Exception:
             pass
 
-        # pad 约束 (与 Qwen/Whisper 一致)
-        asr_pad_ms = getattr(ctx, 'asr_pad_ms', 100)
-        cs = max(win_s, cs - asr_pad_ms)
-        ce = min(win_e, ce + asr_pad_ms)
-        if _left_pad > 0:
-            cs = max(cs, orig_s - _left_pad)
-        if _right_pad > 0:
-            ce = min(ce, orig_e + _right_pad)
-
-        ce = max(ce, orig_e)
-        cs = min(cs, orig_s)
-
-        dur_ms = ce - cs
-        if dur_ms > 50:
-            corrected_times[idx] = (cs, ce)
+        from .utils import calibrate_times as _ct
+        cs, ce = _ct(vad_s, vad_e, orig_s, orig_e, win_s, win_e, _left_pad, _right_pad)
+        if ce - cs > 50:
+            corrected_times[i] = (cs, ce)
             changed_count += (cs != orig_s or ce != orig_e)
-
-        try:
-            os.remove(seg_path)
-        except Exception:
-            pass
 
     return corrected_times, seg_texts, changed_count > 0

@@ -215,3 +215,80 @@ def transcribe_full(
     segs.sort(key=lambda x: x["start_ms"])
     _log(f"转写: {len(words)} 词, {_t.time()-_t0:.1f}s")
     return words, segs
+
+
+def align_subs(subs, send_ranges, ctx, words, segments):
+    """用 Whiper 词/段时间戳拟合字幕区间
+
+    Args:
+        subs: 字幕列表
+        send_ranges: _compute_send_ranges 输出
+        ctx: PipelineContext
+        words: 词级时间戳
+        segments: 段级时间戳
+
+    Returns:
+        (corrected_times, seg_texts, has_changes)
+    """
+    import bisect
+    from .utils import calibrate_times as _ct
+
+    _pad_ms = ctx.asr_pad_ms
+    _seg_starts = [s["start_ms"] for s in segments] if segments else []
+    _word_starts = [w["start_ms"] for w in words]
+    corrected_times = {}
+    seg_texts = {}
+    changed_count = 0
+    _seg_hit = 0
+    _word_hit = 0
+
+    def _fit_by_segment(win_s, win_e):
+        """完全被拟合窗口包裹的 segment"""
+        if not segments:
+            return None
+        _lo = bisect.bisect_left(_seg_starts, win_s)
+        _hi = bisect.bisect_right(_seg_starts, win_e)
+        _hits = []
+        for j in range(_lo, min(_hi, len(segments))):
+            _s = segments[j]
+            if _s["start_ms"] >= win_s and _s["end_ms"] <= win_e:
+                _hits.append(_s)
+        if not _hits:
+            return None
+        return _hits[0]["start_ms"], _hits[-1]["end_ms"], "".join(h["text"] for h in _hits)
+
+    def _fit_by_words(bound_s, bound_e):
+        """原字幕区间内首尾词兜底"""
+        _lo = bisect.bisect_left(_word_starts, bound_s)
+        _hi = bisect.bisect_right(_word_starts, bound_e)
+        _ww = words[_lo:_hi]
+        if _ww:
+            return _ww[0]["start_ms"], _ww[-1]["end_ms"]
+        return None
+
+    for i, sub in enumerate(subs):
+        orig_s, orig_e = sub.start_ms, sub.end_ms
+        win_s, win_e, _left_pad, _right_pad = send_ranges[i]
+
+        _fit = _fit_by_segment(win_s, win_e)
+        if _fit is not None:
+            _first_s, _last_e, _seg_text = _fit
+            seg_texts[i] = _seg_text
+            _seg_hit += 1
+        else:
+            _wf = _fit_by_words(orig_s, orig_e)
+            if _wf is not None:
+                _first_s, _last_e = _wf
+                _word_hit += 1
+            else:
+                corrected_times[i] = (orig_s, orig_e)
+                continue
+
+        cs, ce = _ct(_first_s, _last_e, orig_s, orig_e,
+                      win_s, win_e, _left_pad, _right_pad, _pad_ms)
+        dur_ms = ce - cs
+        if dur_ms > 50:
+            corrected_times[i] = (cs, ce)
+            changed_count += (cs != orig_s or ce != orig_e)
+
+    return corrected_times, seg_texts, changed_count > 0

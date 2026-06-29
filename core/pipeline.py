@@ -439,7 +439,10 @@ class SubStep(BaseStep):
         # 预计算所有送检区间 (一次性, 避免每条重复计算)
         _send_ranges = SubStep._compute_send_ranges(ctx.raw_subs, ctx)
 
-        # Phase 1: 并行提取音频片段（给 Qwen 送检)
+        # 统一提取送检音频片段（复用 _extract_audio_clips)
+        _clip_paths = SubStep._extract_audio_clips(ctx.raw_subs, _send_ranges, ctx.vocals_path, ctx.work_dir)
+
+        # Phase 1: 准备 Qwen 对齐参数
         def _prepare_one(i):
             ctx.check_cancelled()
             src_sub = ctx.raw_subs[i]
@@ -448,15 +451,12 @@ class SubStep(BaseStep):
             if not txt:
                 return i, None, orig_s, orig_e, orig_s, orig_e, "空文本"
 
-            # ── 使用预计算的送检区间 ──
             clip_s, clip_e, _left_pad, _right_pad = _send_ranges[i]
+            seg_path = _clip_paths.get(src_sub.idx)
+            if not seg_path or not os.path.exists(seg_path):
+                return i, None, orig_s, orig_e, clip_s, clip_e, "无音频片段"
 
-            seg_path = os.path.join(ctx.work_dir, f"qwen_seg_{i:04d}.wav")
-            try:
-                split_audio_np(ctx.vocals_path, clip_s, clip_e, seg_path)
-                return i, (seg_path, txt), orig_s, orig_e, clip_s, clip_e, None
-            except Exception as e:
-                return i, None, orig_s, orig_e, clip_s, clip_e, f"异常:{e}"
+            return i, (seg_path, txt), orig_s, orig_e, clip_s, clip_e, None
 
         _qwen_threads = get_threads(ctx, 'qwen_aligner_threads')
         with ThreadPoolExecutor(max_workers=_qwen_threads) as ex:
@@ -599,14 +599,14 @@ class SubStep(BaseStep):
             _qwen_unload()
             ctx.log_ui("  Qwen 模型已卸载,显存已释放")
 
-        # 清理临时片段文件
-        for i in range(total):
-            seg_path = os.path.join(ctx.work_dir, f"qwen_seg_{i:04d}.wav")
-            if os.path.exists(seg_path):
-                try:
-                    os.remove(seg_path)
-                except OSError:
-                    pass
+        # 清理临时片段文件 (0.5 步生成,兼容旧命名)
+        import glob as _glob
+        for _p in _glob.glob(os.path.join(ctx.work_dir, "qwen_seg_*.wav")):
+            try: os.remove(_p)
+            except: pass
+        for _p in _glob.glob(os.path.join(ctx.work_dir, "_align_clip_*.wav")):
+            try: os.remove(_p)
+            except: pass
 
         # 将校准时间写入目标字幕和原声字幕（原地修改)
         # 仅对成功校准的条目（_aligned, reason=="OK"）写入 calib_ 字段;
@@ -628,9 +628,8 @@ class SubStep(BaseStep):
 
     # ── 路径 C: Whisper 转写对齐 (无原声字幕时可用) ────────
 
-    def _run_whisper_align(self, ctx: PipelineContext,
-                                 subs) -> bool:
-        """用 faster-whisper 转写人声轨, 词级时间戳矫正字幕区间, 返回 has_calib_changes"""
+    def _run_whisper_align(self, ctx: PipelineContext, subs) -> bool:
+        """用 faster-whisper 转写 → align_subs 拟合 (segment/word 兜底封装在 aligner 内部)"""
         total = len(subs)
         if total == 0:
             raise RuntimeError("目标字幕为空")
@@ -653,185 +652,49 @@ class SubStep(BaseStep):
             except Exception as e:
                 ctx.log_ui(f"  ⛔Whisper 转写失败 ({e}), 回退直接使用 SRT 时间")
                 return False
-
             if not words:
                 ctx.log_ui("  ⚠️Whisper 无转写结果, 回退直接使用 SRT 时间")
                 return False
 
-            # 保存原始 Whisper ASR 结果（未校准前）
+            # 保存原始 ASR
             try:
-                from .srt_parser import write_srt as _raw_write_srt
-                _raw_entries = [(s["start_ms"], s["end_ms"], s["text"]) for s in segments]
-                _raw_srt_path = os.path.join(ctx.cache.cache_dir, "whisper.ja.srt")
-                _raw_write_srt(_raw_entries, _raw_srt_path)
+                from .srt_parser import write_srt as _rws
+                _rws([(s["start_ms"], s["end_ms"], s["text"]) for s in segments],
+                     os.path.join(ctx.cache.cache_dir, "whisper.ja.srt"))
             except Exception:
                 pass
 
-            _pad_ms = ctx.asr_pad_ms          # 校准后头尾静音 pad (100ms)
-            _safe_gap = ctx.asr_safe_gap       # 两字幕安全间隔 (200ms)
-            _max_pad = ctx.asr_max_pad         # 拟合窗口最大扩展 (500ms)
-
-            # segment 起止时间数组, 二分查找加速
-            _seg_starts = [s["start_ms"] for s in segments] if segments else []
-            _word_starts = [w["start_ms"] for w in words]
-
-            import bisect
-
-
-            def _fit_by_segment(win_s, win_e):
-                """收集完全被拟合窗口 [win_s, win_e] 包裹的 segment
-
-                只采纳 start≥win_s 且 end≤win_e 的 segment（拒绝部分重叠),
-                避免 Whisper 超长段(如 VAD 误合并)污染校准结果。
-                一条字幕可能包住多个 segment (长台词被 Whisper 切几段),
-                合并首尾时间 + 拼接文本。
-
-                Returns: (seg_start, seg_end, merged_text) 或 None (无命中)
-                """
-                if not segments:
-                    return None
-                _lo = bisect.bisect_left(_seg_starts, win_s)
-                _hi = bisect.bisect_right(_seg_starts, win_e)
-                _hits = []
-                for j in range(_lo, min(_hi, len(segments))):
-                    _seg = segments[j]
-                    if _seg["start_ms"] >= win_s and _seg["end_ms"] <= win_e:
-                        _hits.append(_seg)
-                if not _hits:
-                    return None
-                _first_s = _hits[0]["start_ms"]
-                _last_e = _hits[-1]["end_ms"]
-                _text = "".join(h["text"] for h in _hits)
-                return _first_s, _last_e, _text
-
-            def _fit_by_words(bound_s, bound_e):
-                """词级兜底: 取原字幕区间内首尾词时间戳 (segment 未命中时用)"""
-                _lo = bisect.bisect_left(_word_starts, bound_s)
-                _hi = bisect.bisect_right(_word_starts, bound_e)
-                _win_words = words[_lo:_hi]
-                if _win_words:
-                    return _win_words[0]["start_ms"], _win_words[-1]["end_ms"]
-                return None
-
-            corrected_times = {}
-            seg_texts = {}  # {idx: 拟合命中的 segment 文本} (供生成 .ja.srt)
-            changed_count = 0
-            _seg_hit = 0
-            _word_hit = 0
-            _log_msgs = []
-
-            # 预计算所有送检区间 (一次性, 避免每条重复计算)
+            # 对齐 (segment/word 拟合 + 共用 calibrate_times)
             _send_ranges = SubStep._compute_send_ranges(subs, ctx)
+            corrected_times, seg_texts, has_changes = _wa.align_subs(
+                subs, _send_ranges, ctx, words, segments)
 
-            for i, sub in enumerate(subs):
-                orig_s, orig_e = sub.start_ms, sub.end_ms
-
-                # ── 阶段1: 使用预计算的拟合窗口 ──
-                win_s, win_e, _left_pad, _right_pad = _send_ranges[i]
-
-                # ── 阶段2: 在扩展窗口内拟合 (segment 优先, 词级兜底) ──
-                _fit = _fit_by_segment(win_s, win_e)
-                _method = "seg"
-                if _fit is not None:
-                    _first_s, _last_e, _seg_text = _fit
-                else:
-                    _word_fit = _fit_by_words(orig_s, orig_e)
-                    if _word_fit is not None:
-                        _first_s, _last_e = _word_fit
-                        _seg_text = ""
-                        _method = "word"
-                    else:
-                        corrected_times[i] = (orig_s, orig_e)
-                        continue
-
-                if _method == "seg":
-                    _seg_hit += 1
-                    seg_texts[i] = _seg_text
-                else:
-                    _word_hit += 1
-
-                # ── 阶段3: 校准后头尾 100ms 静音 pad (受相邻 200ms safe_gap 约束) ──
-                cs = max(0, _first_s - _pad_ms)
-                ce = _last_e + _pad_ms
-                # 头部不越过上一条 (留 safe_gap)
-                if _left_pad > 0:
-                    cs = max(cs, orig_s - _left_pad)
-                # 尾部不越过下一条 (留 safe_gap)
-                if _right_pad > 0:
-                    ce = min(ce, orig_e + _right_pad)
-                # 守卫: 不缩短 (与 Qwen 一致), 起始不晚于原字幕
-                ce = max(ce, orig_e)
-                cs = min(cs, orig_s)
-                dur_ms = ce - cs
-                if dur_ms > 50:
-                    corrected_times[i] = (cs, ce)
-                    changed = (cs != orig_s or ce != orig_e)
-                    if changed:
-                        changed_count += 1
-                        _hd = orig_s - cs
-                        _td = ce - orig_e
-                        _log_msgs.append((i, _hd, _td, _method))
-                    continue
-                corrected_times[i] = (orig_s, orig_e)
-
-            # 按索引排序输出日志
-            for _k, _hd, _td, _method in sorted(_log_msgs, key=lambda x: x[0]):
-                def _fmt(d):
-                    return f"{d:+5d}ms"
-                ctx.log_file(f"  第{_k+1:>4d}条: head={_fmt(_hd)} tail={_fmt(_td)} ({_method})")
-            ctx.log_ui(f"  Whisper 对齐完成: {total} 条中 {changed_count} 条有变动 "
-                       f"(seg命中 {_seg_hit}, word兜底 {_word_hit}), "
-                       f"耗时 {time.time()-_t0:.1f}s")
-
-            # 保存原声日语字幕: 拟合后的时间 + Whisper 识别文本, id 与原字幕一致
-            # 仅 segment 命中的条目有文本, word兜底/未命中的留空白行
-            from .srt_parser import write_srt as _write_srt
-            _ja_entries = []  # [(start_ms, end_ms, text), ...]
-            _ja_filled = 0
+            # 写入 ja.srt + 更新目标字幕校准时间
+            _ja_entries = []
             for i, sub in enumerate(subs):
                 cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-                _txt = seg_texts.get(i, "")  # 仅 segment 命中有文本
-                if _txt:
-                    _ja_filled += 1
-                _ja_entries.append((cs, ce, _txt))
-            if _ja_entries:
-                from pathlib import Path as _P
-                _dst_stem = _P(ctx.dst_srt_path).stem if ctx.dst_srt_path else "whisper"
-                _ja_srt = os.path.join(ctx.cache.cache_dir, f"{_dst_stem}.ja.srt")
-                _n = _write_srt(_ja_entries, _ja_srt)
-                if _n:
-                    ctx.log_ui(f"  原声字幕已保存: {os.path.basename(_ja_srt)} "
-                               f"({total} 条, 含文本 {_ja_filled})")
+                sub.calib_start_ms, sub.calib_end_ms = cs, ce
+                _ja_entries.append((cs, ce, seg_texts.get(i, "")))
+            from .srt_parser import write_srt as _ws
+            _ja_srt = os.path.join(ctx.cache.cache_dir, f"{Path(ctx.dst_srt_path).stem}.ja.srt")
+            _ws(_ja_entries, _ja_srt)
+
+            # 构建 raw_subs
+            ctx.raw_subs = []
+            for i, sub in enumerate(subs):
+                cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
+                ctx.raw_subs.append(SubtitleItem(
+                    idx=sub.idx, start_ms=sub.start_ms, end_ms=sub.end_ms,
+                    text=seg_texts.get(i, "").replace('\n', ' ').strip(),
+                    calib_start_ms=cs, calib_end_ms=ce,
+                ))
+
+            ctx.log_ui(f"  Whisper 对齐完成: {total} 条, 耗时 {time.time()-_t0:.1f}s")
+            return True
         finally:
             _wa.unload_model()
 
-        # 将校准时间写入目标字幕
-        # 走到这里说明 Whisper 转写已成功执行（失败已提前 return False)，
-        # 校准结果一律写入（即使恰好等于原时间，也属成功校准）。
-        for i, sub in enumerate(subs):
-            cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-            sub.calib_start_ms = cs
-            sub.calib_end_ms = ce
-
-        # 填充 ctx.raw_subs: Whisper ASR 文本 + 校准时间
-        ctx.raw_subs = []
-        for i, sub in enumerate(subs):
-            cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-            _txt = seg_texts.get(i, "").replace('\n', ' ').strip()
-            ctx.raw_subs.append(SubtitleItem(
-                idx=sub.idx,
-                start_ms=sub.start_ms,
-                end_ms=sub.end_ms,
-                text=_txt,
-                calib_start_ms=cs,
-                calib_end_ms=ce,
-            ))
-
-        has_calib_changes = True  # Whisper 转写成功即视为有效校准
-        return has_calib_changes
-
     # ── SenseVoice 对齐 ────────────────────────────
-
     def _run_sensevoice_align(self, ctx: PipelineContext, subs) -> bool:
         """用 SenseVoice ASR 对字幕做转写 + VAD 校准"""
         import time as _t
@@ -840,11 +703,12 @@ class SubStep(BaseStep):
         from .aligner_sensevoice import align_subs
         from .srt_parser import write_srt as _write_srt
 
-        # 复用 _compute_send_ranges 预计算送检区间 (与 Qwen/Whisper 一致)
+        # 统一提取送检音频片段 + 计算送检区间
         _send_ranges = SubStep._compute_send_ranges(subs, ctx)
+        _clip_paths = SubStep._extract_audio_clips(subs, _send_ranges, ctx.vocals_path, ctx.work_dir)
 
         corrected_times, seg_texts, has_changes = align_subs(
-            subs, ctx.vocals_path, _send_ranges, ctx,
+            subs, _clip_paths, _send_ranges, ctx,
             progress_cb=lambda d, t: ctx.log_ui(f"  SenseVoice 转写: {d}/{t}"),
         )
 
@@ -852,6 +716,8 @@ class SubStep(BaseStep):
         _ja_entries = []
         for i, sub in enumerate(subs):
             cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
+            sub.calib_start_ms = cs
+            sub.calib_end_ms = ce
             _txt = seg_texts.get(i, "")
             _ja_entries.append((cs, ce, _txt))
         _ja_srt = os.path.join(ctx.cache.cache_dir, f"{Path(ctx.dst_srt_path).stem}.ja.srt")
@@ -863,7 +729,7 @@ class SubStep(BaseStep):
             cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
             _txt = seg_texts.get(i, "")
             ctx.raw_subs.append(SubtitleItem(
-                idx=sub.idx + 1,
+                idx=sub.idx,
                 start_ms=sub.start_ms,
                 end_ms=sub.end_ms,
                 text=_txt,
@@ -873,6 +739,45 @@ class SubStep(BaseStep):
 
         ctx.log_ui(f"  SenseVoice 对齐完成: {len(corrected_times)} 条, 耗时 {_t.time()-_t0:.1f}s")
         return True
+
+    def _sensevoice_rewrite_raw_subs(self, ctx: PipelineContext, subs):
+        """用 SenseVoice ASR 更新原声字幕文本 (Qwen 对齐前调用, 提升强制对齐精度)"""
+        if not ctx.vocals_path or not os.path.exists(ctx.vocals_path):
+            ctx.log_ui("  无人声文件,跳过 SenseVoice ASR 文本更新")
+            return
+        import time as _t, re
+        _t0 = _t.time()
+        try:
+            from .aligner_sensevoice import _get_models
+            _asr_model, _ = _get_models()
+        except Exception as e:
+            ctx.log_ui(f"  SenseVoice ASR 加载失败,跳过文本更新: {e}")
+            return
+        _send_ranges = SubStep._compute_send_ranges(ctx.raw_subs, ctx)
+        _clip_paths = SubStep._extract_audio_clips(
+            ctx.raw_subs, _send_ranges, ctx.vocals_path, ctx.work_dir)
+        if not _clip_paths:
+            ctx.log_ui("  音频片段提取失败,跳过 SenseVoice ASR 文本更新")
+            return
+
+        _updated = 0
+        for i, src_sub in enumerate(ctx.raw_subs):
+            clip = _clip_paths.get(src_sub.idx)
+            if not clip or not os.path.exists(clip):
+                continue
+            try:
+                result = _asr_model.generate(
+                    input=clip, language="auto", ban_emo_unk=True, use_itn=False)
+                if result:
+                    text = re.sub(r"<\|[^|]+\|>", "",
+                                  str(result[0].get("text", ""))).strip()
+                    if text:
+                        src_sub.text = text
+                        _updated += 1
+            except Exception:
+                pass
+        ctx.log_ui(f"  SenseVoice ASR 更新 {_updated}/{len(ctx.raw_subs)} 条原文字幕文本, "
+                   f"耗时 {_t.time()-_t0:.1f}s")
 
     # ── 共享辅助 ──────────────────────────────────
 
@@ -893,6 +798,9 @@ class SubStep(BaseStep):
 
         if ctx.raw_src_path and os.path.exists(ctx.raw_src_path):
             ctx.log_ui(f"  Qwen 对齐原声字幕 {os.path.basename(ctx.raw_src_path)}")
+            # 先用 SenseVoice ASR 更新原声字幕文本, 提升 Qwen 强制对齐精度
+            if ctx.raw_subs:
+                self._sensevoice_rewrite_raw_subs(ctx, subs)
             return self._run_qwen_align(ctx, subs)
 
         ctx.log_ui("  未提供原声字幕,直接使用 SRT 时间")
@@ -944,6 +852,26 @@ class SubStep(BaseStep):
             clip_e = orig_e + _right_pad
             ranges.append((clip_s, clip_e, _left_pad, _right_pad))
         return ranges
+
+    @staticmethod
+    def _extract_audio_clips(subs: list, send_ranges: list, vocals_path: str, work_dir: str) -> dict:
+        """统一提取送检音频片段, 供 Qwen/Whisper/SenseVoice 共用
+
+        Returns:
+            {sub.idx: clip_path, ...}  — 仅包含有音频的条目
+        """
+        from .audio_tools import split_audio_np
+        clips = {}
+        for i, sub in enumerate(subs):
+            win_s, win_e, _, _ = send_ranges[i]
+            clip_path = os.path.join(work_dir, f"_align_clip_{sub.idx:04d}.wav")
+            try:
+                split_audio_np(vocals_path, win_s, win_e, clip_path)
+                if os.path.exists(clip_path):
+                    clips[sub.idx] = clip_path
+            except Exception:
+                pass
+        return clips
 
     def _detect_genders(self, ctx: PipelineContext, subs) -> dict:
         """性别检测"""
