@@ -680,6 +680,27 @@ class SubStep(BaseStep):
             corrected_times, seg_texts, has_changes = _wa.align_subs(
                 subs, _send_ranges, ctx, words, segments)
 
+            # 保存词级时间戳映射 (whisper.word.srt)
+            try:
+                import bisect as _b
+                _ws_starts = [w["start_ms"] for w in words]
+                _word_entries = []
+                for sub in subs:
+                    win_s, win_e, _, _ = _send_ranges[sub.idx - 1]
+                    _lo = _b.bisect_left(_ws_starts, win_s)
+                    _hi = _b.bisect_right(_ws_starts, win_e)
+                    _ww = words[_lo:_hi]
+                    if _ww:
+                        _word_entries.append((
+                            _ww[0]["start_ms"], _ww[-1]["end_ms"],
+                            "".join(w["word"] for w in _ww)))
+                    else:
+                        _word_entries.append((sub.start_ms, sub.end_ms, ""))
+                _rws(_word_entries,
+                     os.path.join(ctx.cache.cache_dir, "whisper.word.srt"))
+            except Exception:
+                pass
+
 
             # 校准时间写回目标字幕
             for sub in subs:
