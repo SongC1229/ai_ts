@@ -38,7 +38,7 @@ _ITEMS: List[_Item] = [
     _Item("whisper_beam_size",          "Whisper波束宽度",   "int",   1, 20),
 
     # ── 字幕校准 ──
-    _Item("align_mode",                 "字幕对齐模式",      "choice", choices=["qwen", "whisper", "sensevoice"]),
+    _Item("align_mode",                 "字幕对齐模式",      "choice", choices=["qwen", "whisper"]),
 
     # ── 性别检测 ──
     _Item("gender_detect_mode",         "性别检测模式",      "choice", choices=["wavlm", "gender_cls"]),

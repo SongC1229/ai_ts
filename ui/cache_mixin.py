@@ -129,7 +129,7 @@ class CacheMixin:
             "tts_similarity": "4.1 声纹校验缓存",
             "mix": "5.音频合成",
         }
-        _all_labels = {**step_labels, "subs_gender": "3.2 性别检测", "subs_align": "3.1 字幕对齐"}
+        _all_labels = {**step_labels, "subs_asr": "3.0 原声ASR字幕", "subs_gender": "3.2 性别检测", "subs_align": "3.1 字幕对齐"}
         dlg = QDialog(self)
         dlg.setWindowTitle(f"分步清空缓存 — {Path(cm.video_path).stem}")
         dlg.setMinimumWidth(420)
@@ -182,6 +182,7 @@ class CacheMixin:
                 _lb.setStyleSheet("font-weight: bold; color: #666; padding-left: 4px;")
                 lo.addWidget(_lb)
                 for _sk, _sl, _sp in [
+                    ("subs_asr", "3.0 原声ASR字幕", "asr.srt"),
                     ("subs_align", "3.1 字幕对齐", "calib.json"),
                     ("subs_gender", "3.2 性别检测", "genders_cache.json"),
                 ]:

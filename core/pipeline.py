@@ -354,10 +354,25 @@ class SubStep(BaseStep):
 
         self._progress(ctx, 0, f"字幕处理 (0/{total})")
 
-        # 3. 有校准缓存 → 从 calib.json 直接写入 subs, 跳过对齐
+        # 3.0 原声 ASR 字幕 — SenseVoice 用目标字幕区间 ASR 生成并缓存 .asr.srt
+        # 3.0 原声 ASR 字幕 (独立于校准缓存, 仅更新文本不改时间)
+        _asr_exists, _asr_path, _asr_rel = ctx.cache.file_info(Step.SUBS, "asr.srt")
+        if _asr_exists:
+            from .srt_parser import parse_srt
+            ctx.raw_subs = parse_srt(_asr_path)
+            ctx.log_ui(f"  从缓存加载 ASR 原声字幕: {_asr_rel}")
+        else:
+            asr_subs = self._generate_asr_srt(ctx, subs)
+            if asr_subs:
+                from .srt_parser import write_srt, SubtitleItem
+                write_srt(asr_subs, _asr_path)
+                ctx.raw_subs = [SubtitleItem(idx=i+1, start_ms=s, end_ms=e, text=t)
+                                for i, (s, e, t) in enumerate(asr_subs)]
+                ctx.log_ui(f"  ASR 原声字幕已生成: {_asr_rel}")
+
         if _has_calib:
             ctx.log_ui("  检测到校准缓存,跳过对齐,直接从缓存恢复")
-            ctx.cache.load_calib_cache(subs)
+            ctx.cache.load_calib_cache(subs, ctx.raw_subs)
             has_calib_changes = True
         else:
             has_calib_changes = self._do_alignment(ctx, subs)
@@ -398,7 +413,12 @@ class SubStep(BaseStep):
         if not subs:
             subs = parse_srt(ctx.dst_srt_path)
         ctx.cache.load_gender_cache(subs)
-        ctx.cache.load_calib_cache(subs)
+        # 先恢复 ASR 原声字幕文本
+        _asr_exists, _asr_path, _ = ctx.cache.file_info(Step.SUBS, "asr.srt")
+        if _asr_exists:
+            ctx.raw_subs = parse_srt(_asr_path)
+        # 再加载校准（同时写入 subs 和 raw_subs）
+        ctx.cache.load_calib_cache(subs, ctx.raw_subs)
         ctx.subs = subs
         ctx.has_calib_changes = False
 
@@ -694,92 +714,41 @@ class SubStep(BaseStep):
         finally:
             _wa.unload_model()
 
-    # ── SenseVoice 对齐 ────────────────────────────
-    def _run_sensevoice_align(self, ctx: PipelineContext, subs) -> bool:
-        """用 SenseVoice ASR 对字幕做转写 + VAD 校准"""
-        import time as _t
-        _t0 = _t.time()
+    # ── ASR 原声字幕生成 ────────────────────────────
 
-        from .aligner_sensevoice import align_subs
-        from .srt_parser import write_srt as _write_srt
-
-        # 统一提取送检音频片段 + 计算送检区间
-        _send_ranges = SubStep._compute_send_ranges(subs, ctx)
-        _clip_paths = SubStep._extract_audio_clips(subs, _send_ranges, ctx.vocals_path, ctx.work_dir)
-
-        corrected_times, seg_texts, has_changes = align_subs(
-            subs, _clip_paths, _send_ranges, ctx,
-            progress_cb=lambda d, t: ctx.log_ui(f"  SenseVoice 转写: {d}/{t}"),
-        )
-
-        # 写入原声字幕 ja.srt
-        _ja_entries = []
-        for i, sub in enumerate(subs):
-            cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-            sub.calib_start_ms = cs
-            sub.calib_end_ms = ce
-            _txt = seg_texts.get(i, "")
-            _ja_entries.append((cs, ce, _txt))
-        _ja_srt = os.path.join(ctx.cache.cache_dir, f"{Path(ctx.dst_srt_path).stem}.ja.srt")
-        _write_srt(_ja_entries, _ja_srt)
-
-        # 将校准时间和 ASR 文本写入 raw_subs
-        ctx.raw_subs = []
-        for i, sub in enumerate(subs):
-            cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-            _txt = seg_texts.get(i, "")
-            ctx.raw_subs.append(SubtitleItem(
-                idx=sub.idx,
-                start_ms=sub.start_ms,
-                end_ms=sub.end_ms,
-                text=_txt,
-                calib_start_ms=cs,
-                calib_end_ms=ce,
-            ))
-
-        ctx.log_ui(f"  SenseVoice 对齐完成: {len(corrected_times)} 条, 耗时 {_t.time()-_t0:.1f}s")
-        return True
-
-    def _sensevoice_rewrite_raw_subs(self, ctx: PipelineContext, subs):
-        """用 SenseVoice ASR 更新原声字幕文本 (Qwen 对齐前调用, 提升强制对齐精度)"""
+    def _generate_asr_srt(self, ctx: PipelineContext, subs) -> list:
+        """用 SenseVoice ASR 对目标字幕区间生成原文字幕文本"""
         if not ctx.vocals_path or not os.path.exists(ctx.vocals_path):
-            ctx.log_ui("  无人声文件,跳过 SenseVoice ASR 文本更新")
-            return
-        import time as _t, re
-        _t0 = _t.time()
+            ctx.log_ui("  无人声文件,跳过 ASR 字幕生成")
+            return []
+        import time as _t; _t0 = _t.time()
         try:
             from .aligner_sensevoice import _get_models
             _asr_model, _ = _get_models()
         except Exception as e:
-            ctx.log_ui(f"  SenseVoice ASR 加载失败,跳过文本更新: {e}")
-            return
-        _send_ranges = SubStep._compute_send_ranges(ctx.raw_subs, ctx)
-        _clip_paths = SubStep._extract_audio_clips(
-            ctx.raw_subs, _send_ranges, ctx.vocals_path, ctx.work_dir)
-        if not _clip_paths:
-            ctx.log_ui("  音频片段提取失败,跳过 SenseVoice ASR 文本更新")
-            return
-
-        _updated = 0
-        for i, src_sub in enumerate(ctx.raw_subs):
-            clip = _clip_paths.get(src_sub.idx)
+            ctx.log_ui(f"  SenseVoice ASR 加载失败: {e}")
+            return []
+        _ranges = SubStep._compute_send_ranges(subs, ctx)
+        _clips = SubStep._extract_audio_clips(subs, _ranges, ctx.vocals_path, ctx.work_dir)
+        if not _clips:
+            ctx.log_ui("  音频片段提取失败,跳过 ASR")
+            return []
+        import re
+        entries = []
+        for i, sub in enumerate(subs):
+            clip = _clips.get(sub.idx)
             if not clip or not os.path.exists(clip):
+                entries.append((sub.start_ms, sub.end_ms, ""))
                 continue
             try:
-                result = _asr_model.generate(
-                    input=clip, language="auto", ban_emo_unk=True, use_itn=False)
-                if result:
-                    text = re.sub(r"<\|[^|]+\|>", "",
-                                  str(result[0].get("text", ""))).strip()
-                    if text:
-                        src_sub.text = text
-                        _updated += 1
+                res = _asr_model.generate(input=clip, language="auto", ban_emo_unk=True, use_itn=False)
+                txt = re.sub(r"<\|[^|]+\|>", "", str(res[0].get("text",""))).strip() if res else ""
+                entries.append((sub.start_ms, sub.end_ms, txt))
             except Exception:
-                pass
-        ctx.log_ui(f"  SenseVoice ASR 更新 {_updated}/{len(ctx.raw_subs)} 条原文字幕文本, "
+                entries.append((sub.start_ms, sub.end_ms, ""))
+        ctx.log_ui(f"  SenseVoice ASR: {len([e for e in entries if e[2]])}/{len(entries)} 条, "
                    f"耗时 {_t.time()-_t0:.1f}s")
-
-    # ── 共享辅助 ──────────────────────────────────
+        return entries
 
     def _do_alignment(self, ctx: PipelineContext, subs) -> bool:
         """字幕校准对齐 — Qwen / Whisper / 无对齐, 返回 has_calib_changes"""
@@ -792,15 +761,9 @@ class SubStep(BaseStep):
                 ctx.log_ui(f"  faster-whisper-large-v3 {_model_device} float16（load {_load_time:.1f}s）")
             return _ret
 
-        if _align_mode == 'sensevoice':
-            ctx.log_ui("  SenseVoice ASR 转写对齐模式")
-            return self._run_sensevoice_align(ctx, subs)
-
-        if ctx.raw_src_path and os.path.exists(ctx.raw_src_path):
-            ctx.log_ui(f"  Qwen 对齐原声字幕 {os.path.basename(ctx.raw_src_path)}")
-            # 先用 SenseVoice ASR 更新原声字幕文本, 提升 Qwen 强制对齐精度
-            if ctx.raw_subs:
-                self._sensevoice_rewrite_raw_subs(ctx, subs)
+        # Qwen 强制对齐 (已通过 ASR 步骤生成 ctx.raw_subs)
+        if ctx.raw_subs:
+            ctx.log_ui(f"  Qwen 强制对齐 (ASR 原声, {len(ctx.raw_subs)} 条)")
             return self._run_qwen_align(ctx, subs)
 
         ctx.log_ui("  未提供原声字幕,直接使用 SRT 时间")
