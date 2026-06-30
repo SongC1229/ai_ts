@@ -87,7 +87,7 @@ def parse_srt(filepath: str) -> List[SubtitleItem]:
 
     for block in blocks:
         lines = block.strip().split('\n')
-        if len(lines) < 3:
+        if len(lines) < 2:
             continue
 
         # 第一行：序号
@@ -107,8 +107,10 @@ def parse_srt(filepath: str) -> List[SubtitleItem]:
         start_ms = _timestamp_to_ms(time_match.group(1))
         end_ms = _timestamp_to_ms(time_match.group(2))
 
-        # 剩余行：字幕文本
-        text = '\n'.join(lines[2:]).strip()
+        # 剩余行：字幕文本（2行时视为空文本)
+        text = '\n'.join(lines[2:]).strip() if len(lines) > 2 else ""
+        # 去掉零宽空格（空文本占位)
+        text = text.replace('\u200b', '')
         # 去掉 HTML 标签
         text = _HTML_TAG_RE.sub('', text)
         # 去掉 {...} 格式标签
@@ -120,6 +122,14 @@ def parse_srt(filepath: str) -> List[SubtitleItem]:
                 start_ms=start_ms,
                 end_ms=end_ms,
                 text=text
+            ))
+        else:
+            # 保留空文本条目，保证 idx 序列连续 (ASR 字幕的占位)
+            items.append(SubtitleItem(
+                idx=index,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                text=""
             ))
 
     return items
@@ -157,7 +167,7 @@ def write_srt(subs: List, out_path: str) -> int:
             s_ms, e_ms, text = sub
         lines.append(str(i + 1))
         lines.append(f"{fmt_srt_time(s_ms)} --> {fmt_srt_time(e_ms)}")
-        lines.append(text)
+        lines.append(text or "\u200b")  # 零宽空格,防止 parse_srt 因不足3行跳过
         lines.append("")  # 空行分隔
     try:
         import os

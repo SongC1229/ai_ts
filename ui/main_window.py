@@ -768,11 +768,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         _asr_exists, _asr_path, _ = cm.file_info(Step.SUBS, "asr.srt")
         if _asr_exists:
             self.src_srt_path_edit.setText(os.path.normpath(_asr_path))
-        # 回退: 检测视频同目录 .ja.srt (仅当缓存 ASR 未设置时)
-        if not self.src_srt_path_edit.text().strip():
-            src_candidate = os.path.join(vid_dir, f"{vid_stem}.ja.srt")
-            if os.path.exists(src_candidate):
-                self.src_srt_path_edit.setText(os.path.normpath(src_candidate))
+        # NOTE: 原声字幕仅从缓存 subs/asr.srt 加载。不检测视频同目录 .ja.srt
         # 校准缓存在 _on_srt_loaded 完成后加载（此时 subtitle_row_map 已就绪)
 
     def _browse_srt(self):

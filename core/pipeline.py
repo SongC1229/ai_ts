@@ -362,6 +362,7 @@ class SubStep(BaseStep):
             ctx.cache.load_calib_cache(subs, ctx.raw_subs)
         else:
             if self._do_alignment(ctx, subs):
+                ctx.subs = subs
                 self._save_calib_cache(ctx)
 
         # 4. 性别检测（独立缓存检查)
@@ -430,7 +431,7 @@ class SubStep(BaseStep):
             _qwen_load()
         except Exception as e:
             ctx.log_ui(f"  Qwen 模型加载失败 ({e}),跳过对齐,直接使用 SRT 时间")
-            corrected_times = {i: (s.start_ms, s.end_ms) for i, s in enumerate(dst_subs)}
+            corrected_times = {s.idx: (s.start_ms, s.end_ms) for s in dst_subs}
             return False
 
         BATCH_SIZE = ctx.qwen_batch_size or 8
@@ -502,6 +503,7 @@ class SubStep(BaseStep):
                         orig_s, orig_e, clip_s = prepared[k][1], prepared[k][2], prepared[k][3]
                         clip_s_now = clip_s
                         clip_e = prepared[k][4]
+                        _k_idx = dst_subs[k].idx
                         _qwen_fs = 0
                         le = 0
                         if words:
@@ -538,36 +540,37 @@ class SubStep(BaseStep):
                                     _final_e = max(ce, orig_e)
                                     _qvad_hd = (clip_s_now + _qwen_fs) - _final_s
                                     _qvad_td = (clip_s_now + le) - _final_e
-                                    corrected_times[k] = (_final_s, _final_e)
+                                    corrected_times[_k_idx] = (_final_s, _final_e)
                                     changed_count += (_final_s != orig_s or _final_e != orig_e)
-                                    _aligned.add(k)
+                                    _aligned.add(_k_idx)
                                     reason = "OK"
                                 else:
-                                    corrected_times[k] = (orig_s, orig_e)
+                                    corrected_times[_k_idx] = (orig_s, orig_e)
                                     reason = f"语速过快({rate:.1f}字/s)"
                             else:
-                                corrected_times[k] = (orig_s, orig_e)
+                                corrected_times[_k_idx] = (orig_s, orig_e)
                                 reason = "无对齐结果"
                         else:
-                            corrected_times[k] = (orig_s, orig_e)
+                            corrected_times[_k_idx] = (orig_s, orig_e)
                             reason = "无对齐结果"
 
-                        s, e = corrected_times[k]
+                        s, e = corrected_times[_k_idx]
                         # 只当 Qwen 有调整时才打印
                         if _qwen_fs > 20 or le > 20:
                             _hd = self._diff_h(orig_s, s)
                             _td = self._diff_t(orig_e, e)
-                            _log_msgs.append((k, _hd, _td, _qwen_head_diff, _qwen_tail_diff, _qvad_hd, _qvad_td, reason))
+                            _log_msgs.append((_k_idx, _hd, _td, _qwen_head_diff, _qwen_tail_diff, _qvad_hd, _qvad_td, reason))
 
                 for j in batch_indices:
-                    if j not in corrected_times:
+                    _j_idx = dst_subs[j].idx
+                    if _j_idx not in corrected_times:
                         orig_s, orig_e = prepared[j][1], prepared[j][2]
                         clip_s_fb = prepared[j][3] if len(prepared[j]) > 3 else orig_s
                         clip_e_fb = prepared[j][4] if len(prepared[j]) > 4 else orig_e
                         err = prepared[j][5] if len(prepared[j]) > 5 else ''
-                        corrected_times[j] = (clip_s_fb, clip_e_fb)
+                        corrected_times[_j_idx] = (clip_s_fb, clip_e_fb)
                         if err:
-                            ctx.log_ui(f"  第{j+1:>4d}条: 跳过 ({err})")
+                            ctx.log_ui(f"  第{_j_idx:>4d}条: 跳过 ({err})")
 
                 done = batch_pos + len(batch_indices)
                 if done % 10 == 0 or done == len(_sorted_indices):
@@ -575,14 +578,15 @@ class SubStep(BaseStep):
 
             # 处理跳过的条目（item 为 None 的)
             for j in range(total):
-                if j not in corrected_times:
+                _j_idx = dst_subs[j].idx
+                if _j_idx not in corrected_times:
                     orig_s, orig_e = prepared[j][1], prepared[j][2]
                     clip_s_fb = prepared[j][3] if len(prepared[j]) > 3 else orig_s
                     clip_e_fb = prepared[j][4] if len(prepared[j]) > 4 else orig_e
                     err = prepared[j][5] if len(prepared[j]) > 5 else ''
-                    corrected_times[j] = (clip_s_fb, clip_e_fb)
+                    corrected_times[_j_idx] = (clip_s_fb, clip_e_fb)
                     if err:
-                        ctx.log_ui(f"  第{j+1:>4d}条: 跳过 ({err})")
+                        ctx.log_ui(f"  第{_j_idx:>4d}条: 跳过 ({err})")
 
             # 按索引排序打印 Qwen 校准日志
             for _k, _hd, _td, _qwen_hd, _qwen_td, _qvad_hd, _qvad_td, _reason in sorted(_log_msgs, key=lambda x: x[0]):
@@ -591,9 +595,9 @@ class SubStep(BaseStep):
                 _qwen_info = f"qwen=[{_fmt(_qwen_hd)}→{_fmt(_qwen_td)}]"
                 _qvad_info = f"qvad=[{_fmt(_qvad_hd)}→{_fmt(_qvad_td)}]"
                 if _reason == "OK":
-                    ctx.log_file(f"  第{_k+1:>4d}条(ms): head={_hd} tail={_td} {_qwen_info} {_qvad_info}")
+                    ctx.log_file(f"  第{_k:>4d}条(ms): head={_hd} tail={_td} {_qwen_info} {_qvad_info}")
                 else:
-                    ctx.log_ui(f"  第{_k+1:>4d}条(ms): head={_hd} tail={_td} {_qwen_info} {_qvad_info} ({_reason})")
+                    ctx.log_ui(f"  第{_k:>4d}条(ms): head={_hd} tail={_td} {_qwen_info} {_qvad_info} ({_reason})")
 
             ctx.log_ui(f"  Qwen 对齐完成: {total} 条中 {len(_aligned)} 条成功校准, {changed_count} 条有变动, 耗时{time.time()-_t0:.1f}s")
         finally:
@@ -602,11 +606,8 @@ class SubStep(BaseStep):
             _qwen_unload()
             ctx.log_ui("  Qwen 模型已卸载,显存已释放")
 
-        # 清理临时片段文件 (0.5 步生成,兼容旧命名)
+        # 清理临时片段文件
         import glob as _glob
-        for _p in _glob.glob(os.path.join(ctx.work_dir, "qwen_seg_*.wav")):
-            try: os.remove(_p)
-            except: pass
         for _p in _glob.glob(os.path.join(ctx.work_dir, "_align_clip_*.wav")):
             try: os.remove(_p)
             except: pass
@@ -614,17 +615,14 @@ class SubStep(BaseStep):
         # 将校准时间写入目标字幕和原声字幕（原地修改)
         # 仅对成功校准的条目（_aligned, reason=="OK"）写入 calib_ 字段;
         # API 失败/无对齐结果回退原时间时保持 0（未校准),避免误判已校准。
-        for i, sub in enumerate(dst_subs):
-            if i in _aligned:
-                s, e = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-                sub.calib_start_ms = s
-                sub.calib_end_ms = e
+        for sub in dst_subs:
+            s, e = corrected_times.get(sub.idx, (sub.start_ms, sub.end_ms))
+            sub.calib_start_ms = s
+            sub.calib_end_ms = e
         for sub in ctx.raw_subs:
-            i = sub.idx - 1
-            if i in _aligned:
-                s, e = corrected_times.get(i, (sub.start_ms, sub.end_ms))
-                sub.calib_start_ms = s
-                sub.calib_end_ms = e
+            s, e = corrected_times.get(sub.idx, (sub.start_ms, sub.end_ms))
+            sub.calib_start_ms = s
+            sub.calib_end_ms = e
 
         has_calib_changes = bool(_aligned)
         return has_calib_changes
@@ -672,19 +670,16 @@ class SubStep(BaseStep):
             corrected_times, seg_texts, has_changes = _wa.align_subs(
                 subs, _send_ranges, ctx, words, segments)
 
-            # 写入 ja.srt + 更新目标字幕校准时间
-            _ja_entries = []
-            for i, sub in enumerate(subs):
-                cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
+
+            # 校准时间写回目标字幕
+            for sub in subs:
+                cs, ce = corrected_times.get(sub.idx - 1, (sub.start_ms, sub.end_ms))
                 sub.calib_start_ms, sub.calib_end_ms = cs, ce
-                _ja_entries.append((cs, ce, seg_texts.get(i, "")))
-            from .srt_parser import write_srt as _ws
-            _ja_srt = os.path.join(ctx.cache.cache_dir, f"{Path(ctx.dst_srt_path).stem}.ja.srt")
-            _ws(_ja_entries, _ja_srt)
 
             # 构建 raw_subs
             ctx.raw_subs = []
-            for i, sub in enumerate(subs):
+            for sub in subs:
+                i = sub.idx - 1
                 cs, ce = corrected_times.get(i, (sub.start_ms, sub.end_ms))
                 ctx.raw_subs.append(SubtitleItem(
                     idx=sub.idx, start_ms=sub.start_ms, end_ms=sub.end_ms,
@@ -732,9 +727,9 @@ class SubStep(BaseStep):
             try:
                 res = _asr_model.generate(input=clip, language="auto", ban_emo_unk=True, use_itn=False)
                 txt = re.sub(r"<\|[^|]+\|>", "", str(res[0].get("text",""))).strip() if res else ""
-                entries.append(SubtitleItem(i+1, sub.start_ms, sub.end_ms, txt))
+                entries.append(SubtitleItem(sub.idx, sub.start_ms, sub.end_ms, txt))
             except Exception:
-                entries.append(SubtitleItem(i+1, sub.start_ms, sub.end_ms, ""))
+                entries.append(SubtitleItem(sub.idx, sub.start_ms, sub.end_ms, ""))
         ctx.log_ui(f"  SenseVoice ASR: {len([e for e in entries if e.text])}/{len(entries)} 条, "
                    f"耗时 {_t.time()-_t0:.1f}s")
         return entries
