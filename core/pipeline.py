@@ -328,6 +328,7 @@ class SubStep(BaseStep):
         return [
             ctx.cache.get_path(Step.SUBS, "genders_cache.json"),
             ctx.cache.get_path(Step.SUBS, "calib.json"),
+            ctx.cache.get_path(Step.SUBS, "asr.srt"),
         ]
 
     def run(self, ctx: PipelineContext):
@@ -338,24 +339,10 @@ class SubStep(BaseStep):
         if total == 0:
             raise RuntimeError("字幕为空")
 
-        # 2. 缓存检查
-        _has_calib, _, _ = ctx.cache.file_info(Step.SUBS, "calib.json")
-        _has_gender, _, _ = ctx.cache.file_info(Step.SUBS, "genders_cache.json")
-
-        if _has_calib and _has_gender:
-            ctx.log_ui("  字幕处理缓存命中,从缓存恢复对齐/性别")
-            self._restore_from_cache(ctx, subs)
-            if ctx.on_subs_ready:
-                ctx.on_subs_ready(ctx.subs)
-            if ctx.on_raw_subs_ready and ctx.raw_subs:
-                ctx.on_raw_subs_ready(ctx.raw_subs)
-            self._progress(ctx, 100)
-            return
-
+        # 2. 进度
         self._progress(ctx, 0, f"字幕处理 (0/{total})")
 
-        # 3.0 原声 ASR 字幕 — SenseVoice 用目标字幕区间 ASR 生成并缓存 .asr.srt
-        # 3.0 原声 ASR 字幕 (独立于校准缓存, 仅更新文本不改时间)
+        # 3.0 原声 ASR 字幕 (独立检查, 仅文本不改时间)
         _asr_exists, _asr_path, _asr_rel = ctx.cache.file_info(Step.SUBS, "asr.srt")
         if _asr_exists:
             from .srt_parser import parse_srt
@@ -364,24 +351,28 @@ class SubStep(BaseStep):
         else:
             asr_subs = self._generate_asr_srt(ctx, subs)
             if asr_subs:
-                from .srt_parser import write_srt, SubtitleItem
+                from .srt_parser import write_srt
                 write_srt(asr_subs, _asr_path)
-                ctx.raw_subs = [SubtitleItem(idx=i+1, start_ms=s, end_ms=e, text=t)
-                                for i, (s, e, t) in enumerate(asr_subs)]
+                ctx.raw_subs = asr_subs
                 ctx.log_ui(f"  ASR 原声字幕已生成: {_asr_rel}")
 
+        _has_calib, _, _ = ctx.cache.file_info(Step.SUBS, "calib.json")
         if _has_calib:
             ctx.log_ui("  检测到校准缓存,跳过对齐,直接从缓存恢复")
             ctx.cache.load_calib_cache(subs, ctx.raw_subs)
-            has_calib_changes = True
         else:
-            has_calib_changes = self._do_alignment(ctx, subs)
+            if self._do_alignment(ctx, subs):
+                self._save_calib_cache(ctx)
 
-        # 4. 性别检测（有缓存则跳过；用 calib_ 时间或原始 start/end_ms)
-        genders = ctx.cache.load_gender_cache(subs)
-        if not genders:
+        # 4. 性别检测（独立缓存检查)
+        _has_gender, _, _ = ctx.cache.file_info(Step.SUBS, "genders_cache.json")
+        if _has_gender:
+            ctx.cache.load_gender_cache(subs)
+            ctx.log_ui("  从缓存加载性别标记")
+        else:
             genders = self._detect_genders(ctx, subs)
             ctx.cache.save_gender_cache(genders)
+            ctx.log_ui(f"  性别检测完成: {len(genders)} 条")
 
         # 5. 最终写入
         ctx.subs = subs
@@ -389,16 +380,9 @@ class SubStep(BaseStep):
             ctx.on_subs_ready(subs)
         if ctx.on_raw_subs_ready and ctx.raw_subs:
             ctx.on_raw_subs_ready(ctx.raw_subs)
-        ctx.has_calib_changes = has_calib_changes or any(s.is_calibrated for s in subs)
 
-        # 6. 缓存落地 + done
-        # mark_completed 始终调用（步骤正常完成)；
-        # 校准缓存仅在有真正校准结果时写入,避免把未校准的原时间当作校准缓存。
+        # 6. 完成
         self.mark_completed(ctx)
-        if ctx.has_calib_changes:
-            self._save_calib_cache(ctx)
-        else:
-            ctx.log_ui("  未发生校准,跳过校准缓存")
         self._progress(ctx, 100)
 
     def _save_calib_cache(self, ctx: PipelineContext):
@@ -420,7 +404,6 @@ class SubStep(BaseStep):
         # 再加载校准（同时写入 subs 和 raw_subs）
         ctx.cache.load_calib_cache(subs, ctx.raw_subs)
         ctx.subs = subs
-        ctx.has_calib_changes = False
 
     # ── 路径 A: 原声对齐 ────────────────────────────────
 
@@ -471,20 +454,20 @@ class SubStep(BaseStep):
             if not txt:
                 return i, None, orig_s, orig_e, orig_s, orig_e, "空文本"
 
-            clip_s, clip_e, _left_pad, _right_pad = _send_ranges[i]
+            win_s, win_e, _left_pad, _right_pad = _send_ranges[i]
             seg_path = _clip_paths.get(src_sub.idx)
             if not seg_path or not os.path.exists(seg_path):
-                return i, None, orig_s, orig_e, clip_s, clip_e, "无音频片段"
+                return i, None, orig_s, orig_e, win_s, win_e, "无音频片段"
 
-            return i, (seg_path, txt), orig_s, orig_e, clip_s, clip_e, None
+            return i, (seg_path, txt), orig_s, orig_e, win_s, win_e, None
 
         _qwen_threads = get_threads(ctx, 'qwen_aligner_threads')
         with ThreadPoolExecutor(max_workers=_qwen_threads) as ex:
             futs = {ex.submit(_prepare_one, i): i for i in range(total)}
             prepared = [None] * total
             for f in as_completed(futs):
-                i, item, orig_s, orig_e, clip_s, clip_e, err = f.result()
-                prepared[i] = (item, orig_s, orig_e, clip_s, clip_e, err)
+                i, item, orig_s, orig_e, win_s, win_e, err = f.result()
+                prepared[i] = (item, orig_s, orig_e, win_s, win_e, err)
 
         # Phase 2: 批量 Qwen 对齐（占用显存,完后立即释放)
         _t0 = time.time()
@@ -735,18 +718,24 @@ class SubStep(BaseStep):
             return []
         import re
         entries = []
+        _skip_pattern = re.compile(r'^[(\[（【]')
         for i, sub in enumerate(subs):
+            txt = sub.text or ""
+            # 跳过背景解说（括号内的注释)
+            if _skip_pattern.match(txt.strip()):
+                entries.append(SubtitleItem(sub.idx, sub.start_ms, sub.end_ms, ""))
+                continue
             clip = _clips.get(sub.idx)
             if not clip or not os.path.exists(clip):
-                entries.append((sub.start_ms, sub.end_ms, ""))
+                entries.append(SubtitleItem(sub.idx, sub.start_ms, sub.end_ms, ""))
                 continue
             try:
                 res = _asr_model.generate(input=clip, language="auto", ban_emo_unk=True, use_itn=False)
                 txt = re.sub(r"<\|[^|]+\|>", "", str(res[0].get("text",""))).strip() if res else ""
-                entries.append((sub.start_ms, sub.end_ms, txt))
+                entries.append(SubtitleItem(i+1, sub.start_ms, sub.end_ms, txt))
             except Exception:
-                entries.append((sub.start_ms, sub.end_ms, ""))
-        ctx.log_ui(f"  SenseVoice ASR: {len([e for e in entries if e[2]])}/{len(entries)} 条, "
+                entries.append(SubtitleItem(i+1, sub.start_ms, sub.end_ms, ""))
+        ctx.log_ui(f"  SenseVoice ASR: {len([e for e in entries if e.text])}/{len(entries)} 条, "
                    f"耗时 {_t.time()-_t0:.1f}s")
         return entries
 
@@ -790,7 +779,7 @@ class SubStep(BaseStep):
         - 首条 prev=0, 末条无下一条 → right_pad 取满额 _max_pad
 
         Returns:
-            [(clip_s, clip_e, left_pad, right_pad), ...]  按 subs 顺序
+            [(win_s, win_e, left_pad, right_pad), ...]  按 subs 顺序
             left_pad/right_pad 供后续校准后 pad 约束复用, 避免重复计算
         """
         _safe_gap = ctx.asr_safe_gap
@@ -811,29 +800,35 @@ class SubStep(BaseStep):
                 _right_pad = _calc_pad(subs[i + 1].start_ms - orig_e)
             else:
                 _right_pad = _max_pad  # 末条无下一条, 满额扩展
-            clip_s = max(0, orig_s - _left_pad)
-            clip_e = orig_e + _right_pad
-            ranges.append((clip_s, clip_e, _left_pad, _right_pad))
+            win_s = max(0, orig_s - _left_pad)
+            win_e = orig_e + _right_pad
+            ranges.append((win_s, win_e, _left_pad, _right_pad))
         return ranges
 
     @staticmethod
     def _extract_audio_clips(subs: list, send_ranges: list, vocals_path: str, work_dir: str) -> dict:
-        """统一提取送检音频片段, 供 Qwen/Whisper/SenseVoice 共用
-
-        Returns:
-            {sub.idx: clip_path, ...}  — 仅包含有音频的条目
-        """
+        """统一提取送检音频片段（多线程)"""
         from .audio_tools import split_audio_np
-        clips = {}
-        for i, sub in enumerate(subs):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _extract_one(i, sub):
             win_s, win_e, _, _ = send_ranges[i]
             clip_path = os.path.join(work_dir, f"_align_clip_{sub.idx:04d}.wav")
             try:
                 split_audio_np(vocals_path, win_s, win_e, clip_path)
                 if os.path.exists(clip_path):
-                    clips[sub.idx] = clip_path
+                    return sub.idx, clip_path
             except Exception:
                 pass
+            return sub.idx, None
+
+        clips = {}
+        with ThreadPoolExecutor(max_workers=min(len(subs), 8)) as ex:
+            futs = [ex.submit(_extract_one, i, sub) for i, sub in enumerate(subs)]
+            for f in as_completed(futs):
+                idx, path = f.result()
+                if path:
+                    clips[idx] = path
         return clips
 
     def _detect_genders(self, ctx: PipelineContext, subs) -> dict:
@@ -2175,7 +2170,6 @@ class PipelineOrchestrator:
                 self.ctx.dst_srt_path, parse_srt, self.ctx.raw_src_path)
             self.ctx.subs = _subs or []
             self.ctx.raw_subs = _raw_subs or []
-            self.ctx.has_calib_changes = False
 
     def _check_deps(self, step: BaseStep):
         """检查前置步骤是否已完成（按目标文件或 cache_key)"""
