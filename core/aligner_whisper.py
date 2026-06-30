@@ -268,15 +268,15 @@ def align_subs(subs, send_ranges, ctx, words, segments):
 
     for i, sub in enumerate(subs):
         orig_s, orig_e = sub.start_ms, sub.end_ms
-        clip_s, clip_e, _left_pad, _right_pad = send_ranges[i]
+        win_s, win_e, _left_pad, _right_pad = send_ranges[i]
 
-        _fit = _fit_by_segment(clip_s, clip_e)
+        _fit = _fit_by_segment(win_s, win_e)
         if _fit is not None:
             _first_s, _last_e, _seg_text = _fit
             seg_texts[i] = _seg_text
             _seg_hit += 1
         else:
-            _wf = _fit_by_words(orig_s, orig_e)
+            _wf = _fit_by_words(win_s, win_e)
             if _wf is not None:
                 _first_s, _last_e = _wf
                 _word_hit += 1
@@ -285,7 +285,7 @@ def align_subs(subs, send_ranges, ctx, words, segments):
                 continue
 
         cs, ce = _ct(_first_s, _last_e, orig_s, orig_e,
-                      clip_s, clip_e, _left_pad, _right_pad, _pad_ms)
+                      win_s, win_e, _left_pad, _right_pad, _pad_ms)
         dur_ms = ce - cs
         if dur_ms > 50:
             corrected_times[i] = (cs, ce)

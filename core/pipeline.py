@@ -511,9 +511,8 @@ class SubStep(BaseStep):
                     all_words = _qwen_batch(batch_items, language="ja")
                     for k, words in zip(batch_indices, all_words):
                         item = prepared[k][0]
-                        orig_s, orig_e, clip_s = prepared[k][1], prepared[k][2], prepared[k][3]
-                        clip_s_now = clip_s
-                        clip_e = prepared[k][4]
+                        orig_s, orig_e, win_s = prepared[k][1], prepared[k][2], prepared[k][3]
+                        win_e = prepared[k][4]
                         _k_idx = dst_subs[k].idx
                         _qwen_fs = 0
                         le = 0
@@ -522,11 +521,11 @@ class SubStep(BaseStep):
                             le = int(words[-1]["end_ms"])
                             _le_raw = le  # 保存 VAD 纠正前的原始值
                             _qwen_fs = fs
-                            _qwen_head_diff = clip_s_now + fs - orig_s  # Qwen 起始偏离原始字幕
-                            cs = clip_s_now + fs            # Qwen 检测到的绝对起始
-                            ce = clip_s_now + le            # Qwen 检测到的绝对结束
+                            _qwen_head_diff = win_s + fs - orig_s  # Qwen 起始偏离原始字幕
+                            cs = win_s + fs            # Qwen 检测到的绝对起始
+                            ce = win_s + le            # Qwen 检测到的绝对结束
                             _pad_ms = ctx.asr_pad_ms        # Qwen 结果安全区
-                            cs = max(clip_s_now, cs - _pad_ms)  # 头部裁剪少裁/扩展多扩
+                            cs = max(win_s, cs - _pad_ms)  # 头部裁剪少裁/扩展多扩
 
                             # VAD 后处理：Qwen 可能把尾部无声也吞了,用 VAD 纠正
                             if item and item[0] and os.path.exists(item[0]):
@@ -535,22 +534,22 @@ class SubStep(BaseStep):
                                     _vad_end = int(_vad_info['segments'][-1][1])
                                     if _vad_end < le - _pad_ms:
                                         le = _vad_end + _pad_ms * 2
-                                        ce = clip_s_now + le
+                                        ce = win_s + le
 
                             # Qwen 尾部（VAD 修正后）偏离原始字幕
-                            _qwen_tail_diff = clip_s_now + le - orig_e
+                            _qwen_tail_diff = win_s + le - orig_e
 
-                            ce = min(clip_e, ce + _pad_ms)      # 尾部仅允许扩展
+                            ce = min(win_e, ce + _pad_ms)      # 尾部仅允许扩展
                             ce = max(ce, orig_e)                 # 不低于原始结束（禁止裁剪)
                             cs = min(cs, orig_s)                 # 起始不晚于原字幕（禁止头部裁剪)
                             dur_ms = ce - cs
                             if dur_ms > 50:
                                 rate = len(item[1]) * 1000 / dur_ms
                                 if rate < 15:
-                                    _final_s = min(cs, clip_e - 50)
+                                    _final_s = min(cs, win_e - 50)
                                     _final_e = max(ce, orig_e)
-                                    _qvad_hd = (clip_s_now + _qwen_fs) - _final_s
-                                    _qvad_td = (clip_s_now + le) - _final_e
+                                    _qvad_hd = (win_s + _qwen_fs) - _final_s
+                                    _qvad_td = (win_s + le) - _final_e
                                     corrected_times[_k_idx] = (_final_s, _final_e)
                                     changed_count += (_final_s != orig_s or _final_e != orig_e)
                                     _aligned.add(_k_idx)
@@ -576,10 +575,10 @@ class SubStep(BaseStep):
                     _j_idx = dst_subs[j].idx
                     if _j_idx not in corrected_times:
                         orig_s, orig_e = prepared[j][1], prepared[j][2]
-                        clip_s_fb = prepared[j][3] if len(prepared[j]) > 3 else orig_s
-                        clip_e_fb = prepared[j][4] if len(prepared[j]) > 4 else orig_e
+                        win_s_fb = prepared[j][3] if len(prepared[j]) > 3 else orig_s
+                        win_e_fb = prepared[j][4] if len(prepared[j]) > 4 else orig_e
                         err = prepared[j][5] if len(prepared[j]) > 5 else ''
-                        corrected_times[_j_idx] = (clip_s_fb, clip_e_fb)
+                        corrected_times[_j_idx] = (win_s_fb, win_e_fb)
                         if err:
                             ctx.log_ui(f"  第{_j_idx:>4d}条: 跳过 ({err})")
 
@@ -592,10 +591,10 @@ class SubStep(BaseStep):
                 _j_idx = dst_subs[j].idx
                 if _j_idx not in corrected_times:
                     orig_s, orig_e = prepared[j][1], prepared[j][2]
-                    clip_s_fb = prepared[j][3] if len(prepared[j]) > 3 else orig_s
-                    clip_e_fb = prepared[j][4] if len(prepared[j]) > 4 else orig_e
+                    win_s_fb = prepared[j][3] if len(prepared[j]) > 3 else orig_s
+                    win_e_fb = prepared[j][4] if len(prepared[j]) > 4 else orig_e
                     err = prepared[j][5] if len(prepared[j]) > 5 else ''
-                    corrected_times[_j_idx] = (clip_s_fb, clip_e_fb)
+                    corrected_times[_j_idx] = (win_s_fb, win_e_fb)
                     if err:
                         ctx.log_ui(f"  第{_j_idx:>4d}条: 跳过 ({err})")
 

@@ -55,8 +55,8 @@ class Cfg:
         # ── Whisper 转写对齐参数 (align_mode=whisper 时生效) ──
         # Demucs 提纯人声无背景音, VAD 阈值低于默认 0.5 避免耳语/气声被滤掉
         self.whisper_vad_filter = True          # VAD 预过滤 (True=开启)
-        self.whisper_vad_threshold = 0.4        # 语音概率阈值 (默认 0.5)
-        self.whisper_vad_min_silence_ms = 500    # 静音持续多久才算分段 (默认 2000)
+        self.whisper_vad_threshold = 0.7        # 语音概率阈值 (默认 0.5)
+        self.whisper_vad_min_silence_ms = 200    # 静音持续多久才算分段 (默认 2000)
         self.whisper_vad_speech_pad_ms = 100     # 语音段前后补白 (默认 400)
         self.whisper_beam_size = 5               # beam search 宽度
 
