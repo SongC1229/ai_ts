@@ -74,6 +74,14 @@ class ExecutionMixin:
         for k, v in self.cfg.__dict__.items():
             setattr(ctx, k, v)
         ctx.keep_temp = self.keep_temp_cb.isChecked()
+        # 说话人嵌入路径来自 UI 当前选择
+        _get_emb = lambda combo: (
+            os.path.join(os.getcwd(), "role", combo.currentText())
+            if combo.currentIndex() > 0 else "")
+        ctx.speaker_embedding_path_male = _get_emb(
+            getattr(self, 'speaker_emb_male', None) or type('o',(),{'currentIndex':lambda:0})())
+        ctx.speaker_embedding_path_female = _get_emb(
+            getattr(self, 'speaker_emb_female', None) or type('o',(),{'currentIndex':lambda:0})())
         return ctx
 
     def _start_dub(self):
@@ -91,6 +99,12 @@ class ExecutionMixin:
         self.waveform_preview.set_waveform([], 1)
         self.waveform_preview.set_position(0)
         self.waveform_preview.setEnabled(False)
+        _mode = "固定提示音" if self.cfg.use_fixed_ref else "原视频"
+        _pt_male = getattr(self, 'speaker_emb_male', None)
+        _pt_female = getattr(self, 'speaker_emb_female', None)
+        _m = _pt_male.currentText() if _pt_male and _pt_male.currentIndex() > 0 else "无"
+        _f = _pt_female.currentText() if _pt_female and _pt_female.currentIndex() > 0 else "无"
+        self.log(f"提示音模式: {_mode}, 男声pt: {_m}, 女声pt: {_f}")
 
         ctx = self._build_context(video_path, srt_path, output_dir)
         try:
@@ -192,6 +206,13 @@ class ExecutionMixin:
         idx, sub, row = self._regen_queue[0]
         self._subtitle_model.set_status(row, "tts_synthesizing")
         self._delete_tts_segment(row)
+        # 打印当前提示音模式
+        _mode = "固定提示音" if self.cfg.use_fixed_ref else "原视频"
+        _pt_male = getattr(self, 'speaker_emb_male', None)
+        _pt_female = getattr(self, 'speaker_emb_female', None)
+        _m = _pt_male.currentText() if _pt_male and _pt_male.currentIndex() > 0 else "无"
+        _f = _pt_female.currentText() if _pt_female and _pt_female.currentIndex() > 0 else "无"
+        self.log(f"提示音模式: {_mode}, 男声pt: {_m}, 女声pt: {_f}")
         cache = self._get_cache()
         if not cache:
             self.log("【警告】请先选择视频文件")
@@ -222,6 +243,14 @@ class ExecutionMixin:
         # 把 prompt_text 注入 settings
         _settings = dict(self.cfg.__dict__)
         _settings["prompt_text"] = _prompt_text
+        # 说话人嵌入路径由 UI 当前选择决定
+        for _g in ('male', 'female'):
+            _combo = getattr(self, f'speaker_emb_{_g}', None)
+            if _combo and _combo.currentIndex() > 0:
+                _settings[f'speaker_embedding_path_{_g}'] = os.path.join(
+                    os.getcwd(), "role", _combo.currentText())
+            else:
+                _settings[f'speaker_embedding_path_{_g}'] = ""
 
         t = TaskThread(
             target=regen_single_tts,

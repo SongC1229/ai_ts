@@ -1494,6 +1494,8 @@ class TTSConfig:
     language: str = "zh"
     timeout: int = 120
     extra_params: dict = field(default_factory=dict)
+    speaker_embedding_path_male: str = ""
+    speaker_embedding_path_female: str = ""
     send_prompt_text: bool = False
     use_fixed_ref: bool = False
     fixed_ref_audio_male: str = ""
@@ -1520,6 +1522,8 @@ class TTSConfig:
             use_fixed_ref=ctx.use_fixed_ref,
             fixed_ref_audio_male=ctx.fixed_ref_audio_male,
             fixed_ref_audio_female=ctx.fixed_ref_audio_female,
+            speaker_embedding_path_male=getattr(ctx, 'speaker_embedding_path_male', ''),
+            speaker_embedding_path_female=getattr(ctx, 'speaker_embedding_path_female', ''),
             vocals_path=ctx.vocals_path,
             prompt_text=getattr(ctx, 'prompt_text', ''),
             dots_num_steps=getattr(ctx, 'dots_num_steps', 10),
@@ -1546,6 +1550,8 @@ class TTSConfig:
             use_fixed_ref=d.get("use_fixed_ref", _defaults.use_fixed_ref),
             fixed_ref_audio_male=d.get("fixed_ref_audio_male", _defaults.fixed_ref_audio_male),
             fixed_ref_audio_female=d.get("fixed_ref_audio_female", _defaults.fixed_ref_audio_female),
+            speaker_embedding_path_male=d.get("speaker_embedding_path_male", _defaults.speaker_embedding_path_male),
+            speaker_embedding_path_female=d.get("speaker_embedding_path_female", _defaults.speaker_embedding_path_female),
             vocals_path=d.get("vocals_path", _defaults.vocals_path),
             prompt_text=d.get("prompt_text", _defaults.prompt_text),
             dots_num_steps=d.get("dots_num_steps", _defaults.dots_num_steps),
@@ -1593,14 +1599,21 @@ def synthesize_tts_segment(
     emo_ref_audio = None
     if tts_cfg.use_fixed_ref:
         # 固定提示音模式：固定提示音作为音色参考,原视频人声作为情绪参考
-        if gender == "female" and tts_cfg.fixed_ref_audio_female:
+        # 说话人嵌入模式：用原视频人声做参考(风格由嵌入提供)
+        _emb_key = "speaker_embedding_path_male" if gender == "male" else "speaker_embedding_path_female"
+        _has_emb = getattr(tts_cfg, _emb_key, '') and os.path.exists(getattr(tts_cfg, _emb_key, ''))
+        if _has_emb:
+            # 有训练好的嵌入时,固定提示音不是必须的,用原视频人声做参考
+            # 嵌入在 _local_tts 前加载(见下方固定提示音 + .pt 嵌入代码)
+            pass
+        elif gender == "female" and tts_cfg.fixed_ref_audio_female:
             ref_audio = tts_cfg.fixed_ref_audio_female
         elif gender == "male" and tts_cfg.fixed_ref_audio_male:
             ref_audio = tts_cfg.fixed_ref_audio_male
         else:
             ref_audio = tts_cfg.fixed_ref_audio_female or tts_cfg.fixed_ref_audio_male
         # 固定提示音模式要求文件必须存在,缺失直接报错（不退化为用人声做参考)
-        if not ref_audio or not os.path.exists(ref_audio):
+        if not _has_emb and (not ref_audio or not os.path.exists(ref_audio)):
             raise RuntimeError(f"TTS 合成失败 (第{idx}条): 固定提示音模式未配置有效的提示音文件")
         # 原视频人声片段作为情绪参考（复用 _ref_ 缓存文件,与非固定模式同源)
         if tts_cfg.vocals_path:
@@ -1660,16 +1673,27 @@ def synthesize_tts_segment(
         try:
             _kwargs = dict(
                 text=txt,
-                ref_audio_path=ref_audio,       # 传文件路径,引擎直接读取
                 target_duration_ms=_target_ms,
                 stretch_to_target=False,
                 work_dir=work_dir,
                 output_path=tts_path,
                 **_local_kw,
             )
-            # 固定提示音模式：原人声片段作为情绪参考
+            # 固定提示音 + .pt 模式不传 ref_audio_path(引擎直接加载缓存)
+            if tts_cfg.use_fixed_ref:
+                _emb_key = "speaker_embedding_path_male" if sub.gender == "male" else "speaker_embedding_path_female"
+                _emb_path = getattr(tts_cfg, _emb_key, '') or ''
+                if _emb_path and os.path.exists(_emb_path):
+                    _kwargs["_emb_path_hint"] = _emb_path
+                else:
+                    _kwargs["ref_audio_path"] = ref_audio
+            else:
+                _kwargs["ref_audio_path"] = ref_audio
+            # 情绪参考(固定提示音和人声模式都需要)
             if emo_ref_audio and tts_cfg.tts_local_mode == "indextts":
                 _kwargs["emo_audio_path"] = emo_ref_audio
+                if _emb_path and os.path.exists(_emb_path):
+                    _kwargs["_emb_path_hint"] = _emb_path
             _audio_data = _local_tts(**_kwargs)
         except Exception as e:
             raise RuntimeError(f"TTS 合成失败 (第{idx}条): {e}")

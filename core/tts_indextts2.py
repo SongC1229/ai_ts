@@ -32,6 +32,7 @@ from typing import Optional
 
 from .model_base import MLModelHolder
 from .utils import resolve_device
+import torch
 
 
 def _get_checkpoint_dir() -> str:
@@ -131,6 +132,9 @@ class _IndexTTSHolder(MLModelHolder):
 
 # ── 便利入口函数 ──
 
+_speaker_emb_cache = {}  # .pt路径 -> [1,192] tensor
+
+
 def load_tts_engine(device: str = "auto", dtype: str = "float16"):
     return _IndexTTSHolder.load(device=device, dtype=dtype)
 
@@ -140,6 +144,88 @@ def unload_tts_engine():
     _IndexTTSHolder.unload(move_to_cpu=False)
     if was_loaded:
         print("  [tts] 引擎已卸载,显存已释放")
+
+
+def train_speaker_embedding(clip_paths: list, output_path: str,
+                            device: str = "auto", dtype: str = "float16") -> str:
+    """拼接多条参考音频,提取完整说话人特征集
+
+    将多条音频 VAD 修剪后拼接,一次性提取 style + spk_cond_emb + ref_mel,
+    覆盖全部三个说话人特征分支。
+
+    Args:
+        clip_paths: 音频文件路径列表
+        output_path: 输出 .pt 文件路径
+        device: 推理设备
+        dtype: 精度
+
+    Returns:
+        output_path (写入的 .pt 文件路径)
+    """
+    import soundfile as sf
+    import numpy as np
+    import torchaudio
+
+    model = _IndexTTSHolder.load(device=device, dtype=dtype)
+    if not clip_paths:
+        raise ValueError("clip_paths 为空")
+
+    # 1. 拼接所有音频片段
+    all_audio = []
+    sr = 24000
+    for path in clip_paths:
+        if not os.path.exists(path):
+            print(f"  [tts] 跳过不存在的音频: {path}")
+            continue
+        data, file_sr = sf.read(path)
+        if file_sr != sr:
+            import librosa
+            data = librosa.resample(data, orig_sr=file_sr, target_sr=sr)
+        all_audio.append(data)
+    if not all_audio:
+        raise RuntimeError("没有有效的音频文件用于训练")
+    combined = np.concatenate(all_audio)
+    # 限制最长 15 秒
+    max_samples = 15 * sr
+    if len(combined) > max_samples:
+        combined = combined[:max_samples]
+    audio_t = torch.from_numpy(combined).float().unsqueeze(0)  # [1, T]
+
+    # 2. 提取所有特征（audio 保持在 CPU,按需移入 GPU)
+    audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio_t)
+    audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio_t)
+
+    # 语义特征
+    inputs = model.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
+    input_features = inputs["input_features"].to(model.device)
+    attention_mask = inputs["attention_mask"].to(model.device)
+    spk_cond_emb = model.get_emb(input_features, attention_mask)
+
+    # 语义编解码 + prompt condition
+    _, S_ref = model.semantic_codec.quantize(spk_cond_emb)
+    ref_mel = model.mel_fn(audio_22k.to(spk_cond_emb.device).float())
+    ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
+    prompt_condition = model.s2mel.models['length_regulator'](
+        S_ref, ylens=ref_target_lengths, n_quantizers=3, f0=None)[0]
+
+    # style 嵌入
+    feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(spk_cond_emb.device),
+                                             num_mel_bins=80, dither=0,
+                                             sample_frequency=16000)
+    feat = feat - feat.mean(dim=0, keepdim=True)
+    style = model.campplus_model(feat.unsqueeze(0))
+
+    # mel 频谱
+    ref_mel = model.mel_fn(audio_22k.float())
+
+    torch.save({
+        "speaker_embedding": style.detach().cpu(),  # [1,192]
+        "spk_cond_emb": spk_cond_emb.detach().cpu(),
+        "ref_mel": ref_mel.detach().cpu(),
+        "prompt_condition": prompt_condition.detach().cpu(),
+    }, output_path)
+    print(f"  [tts] 说话人特征集已保存 ({len(clip_paths)} 条音频拼接): {output_path}")
+    return output_path
 
 
 # ── 工具函数 ──
@@ -272,9 +358,20 @@ def tts_synthesize(
     if not work_dir:
         raise ValueError("work_dir is required")
 
-    # 确定参考音频路径
+    # ── 打印函数入参 ──
+    _emb_hint = generation_kwargs.get('_emb_path_hint', '')
+    print(f"  [tts] 文本: {text[:40]}...", flush=True)
+    print(f"  [tts] 参考音频: {ref_audio_path or 'None'}", flush=True)
+    print(f"  [tts] 音色权重: {os.path.basename(_emb_hint) if _emb_hint else 'None'}", flush=True)
+    print(f"  [tts] 情绪参考: {emo_audio_path or 'None'}", flush=True)
+
+    # ── 确定参考音频路径(仅非 pt 模式需要) ──
     _temp_ref_path = None
-    try:
+    ref_path = ""
+    if _emb_hint:
+        # pt 模式: 不要求 ref_audio,用占位路径确保模型内部不出错
+        ref_path = ref_audio_path or "__fixed_speaker__"
+    else:
         if ref_audio is not None:
             _temp_ref_path = _wav_bytes_to_tempfile(ref_audio, work_dir=work_dir)
             ref_path = _temp_ref_path
@@ -287,104 +384,116 @@ def tts_synthesize(
             print("  [tts] 必须提供 ref_audio 或 ref_audio_path")
             return None
 
-        print(f"  [tts] 参考音频: {ref_path}")
-
-        # 确定情绪参考音频路径
-        _temp_emo_path = None
-        try:
-            if emo_audio is not None:
-                _temp_emo_path = _wav_bytes_to_tempfile(emo_audio, work_dir=work_dir)
-                emo_path = _temp_emo_path
-            elif emo_audio_path is not None:
-                if not os.path.exists(emo_audio_path):
-                    print(f"  [tts] 情绪参考音频不存在: {emo_audio_path},使用说话人音频作为情绪参考")
-                    emo_path = None
-                else:
-                    emo_path = emo_audio_path
-            else:
-                emo_path = None  # 默认使用说话人音频
-            if emo_path:
-                print(f"  [tts] 情绪参考: {emo_path}")
-
-        # 加载模型
-            try:
-                model = load_tts_engine(device=device, dtype=dtype)
-            except Exception as e:
-                print(f"  [tts] 模型加载失败: {e}")
-                return None
-
-
-            # 输出路径
-            out_path = os.path.join(work_dir, f"tts_{uuid.uuid4().hex}.wav")
-
-            # 构建 infer 参数
-            infer_kwargs = dict(
-                spk_audio_prompt=ref_path,
-                text=text.strip(),
-                output_path=out_path,
-                verbose=False,
-                emo_alpha=emo_alpha,
-            )
-            if emo_path:
-                infer_kwargs["emo_audio_prompt"] = emo_path
-            if emo_vector is not None:
-                infer_kwargs["emo_vector"] = emo_vector
-            if use_emo_text:
-                infer_kwargs["use_emo_text"] = True
-            if emo_text is not None:
-                infer_kwargs["emo_text"] = emo_text
-            infer_kwargs.update(generation_kwargs)
-
-            # 合成
-            model.infer(**infer_kwargs)
-
-            if not os.path.exists(out_path) or os.path.getsize(out_path) < 100:
-                print("  [tts] 合成返回空文件")
-                return None
-
-            with open(out_path, "rb") as f:
-                wav_data = f.read()
-
-            # 裁剪前导静音,保留约 150ms（混音阶段需参考原声再微调)
-            try:
-                import soundfile as sf
-                import io, numpy as np
-                _data, _sr = sf.read(io.BytesIO(wav_data))
-                _th = max(np.max(np.abs(_data)) * 0.003, 1e-4)
-                _non_silent = np.where(np.abs(_data) > _th)[0]
-                if len(_non_silent) > 0:
-                    _lead_ms = _non_silent[0] / _sr * 1000
-                    if _lead_ms > 180:
-                        _trim_start = int(_non_silent[0] - int(0.15 * _sr))
-                        if _trim_start > 0:
-                            _data = _data[_trim_start:]
-                            _buf = io.BytesIO()
-                            sf.write(_buf, _data, _sr, format="WAV", subtype="PCM_16")
-                            wav_data = _buf.getvalue()
-                            print(f"  [tts] 裁剪前导静音: {_lead_ms:.0f}ms → 150ms")
-            except Exception as _trim_e:
-                print(f"  [tts] 裁剪前导静音失败: {_trim_e}")
-
-            # 时长对齐（仅在 stretch_to_target=True 时拉伸)
-            if target_duration_ms is not None and target_duration_ms > 0 and stretch_to_target:
-                wav_data = _adjust_duration(wav_data, target_duration_ms, target_chars=len(text))
-                print(f"  [tts] 时长对齐到 {target_duration_ms}ms")
-
-            # 输出到指定路径
-            if output_path:
-                os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-                with open(output_path, "wb") as f:
-                    f.write(wav_data)
-                print(f"  [tts] 已保存到: {os.path.basename(output_path)}")
-
-            return wav_data
-
-        finally:
-            if _temp_emo_path:
+    try:
+        # ── 说话人嵌入缓存加载(必须在模型加载前) ──
+        if _emb_hint:
+            generation_kwargs.pop('_emb_path_hint', None)
+            if _emb_hint not in _speaker_emb_cache:
                 try:
-                    os.unlink(_temp_emo_path)
+                    _data = torch.load(_emb_hint)
+                    if "speaker_embedding" in _data:
+                        _speaker_emb_cache[_emb_hint] = _data
                 except Exception:
                     pass
+            _cached = _speaker_emb_cache.get(_emb_hint)
+            if _cached and "speaker_embedding" in _cached:
+                model = _IndexTTSHolder.load(device=device, dtype=dtype)
+                _dev = model.device if hasattr(model, 'device') else next(model.parameters()).device
+                model.cache_spk_cond = _cached["spk_cond_emb"].to(_dev)
+                model.cache_s2mel_style = _cached["speaker_embedding"].to(_dev)
+                model.cache_s2mel_prompt = _cached["prompt_condition"].to(_dev)
+                model.cache_mel = _cached["ref_mel"].to(_dev)
+                model.cache_spk_audio_prompt = ref_path
+            generation_kwargs.pop('_emb_path_hint', None)
+
+        # 确定情绪参考音频路径(用于模型显存)
+        _temp_emo_path = None
+        emo_path = None
+        if emo_audio is not None:
+            _temp_emo_path = _wav_bytes_to_tempfile(emo_audio, work_dir=work_dir)
+            emo_path = _temp_emo_path
+        elif emo_audio_path is not None and os.path.exists(emo_audio_path):
+            emo_path = emo_audio_path
+
+        try:
+            model = load_tts_engine(device=device, dtype=dtype)
+        except Exception as e:
+            print(f"  [tts] 模型加载失败: {e}")
+            return None
+
+        # 输出路径
+        out_path = os.path.join(work_dir, f"tts_{uuid.uuid4().hex}.wav")
+
+        # 构建 infer 参数
+        infer_kwargs = dict(
+            spk_audio_prompt=ref_path,
+            text=text.strip(),
+            output_path=out_path,
+            verbose=False,
+            emo_alpha=emo_alpha,
+        )
+        if emo_path:
+            infer_kwargs["emo_audio_prompt"] = emo_path
+        if emo_vector is not None:
+            infer_kwargs["emo_vector"] = emo_vector
+        if use_emo_text:
+            infer_kwargs["use_emo_text"] = True
+        if emo_text is not None:
+            infer_kwargs["emo_text"] = emo_text
+        infer_kwargs.update(generation_kwargs)
+
+        # 合成
+        try:
+            result = model.infer(**infer_kwargs)
+            if result is None:
+                print("  [tts] model.infer 返回 None", flush=True)
+                return None
+        except Exception as e:
+            import traceback
+            print(f"  [tts] model.infer 异常: {e}", flush=True)
+            traceback.print_exc()
+            return None
+
+        if not os.path.exists(out_path) or os.path.getsize(out_path) < 100:
+            print("  [tts] 合成返回空文件")
+            return None
+
+        with open(out_path, "rb") as f:
+            wav_data = f.read()
+
+        # 裁剪前导静音,保留约 150ms（混音阶段需参考原声再微调)
+        try:
+            import soundfile as sf
+            import io, numpy as np
+            _data, _sr = sf.read(io.BytesIO(wav_data))
+            _th = max(np.max(np.abs(_data)) * 0.003, 1e-4)
+            _non_silent = np.where(np.abs(_data) > _th)[0]
+            if len(_non_silent) > 0:
+                _lead_ms = _non_silent[0] / _sr * 1000
+                if _lead_ms > 180:
+                    _trim_start = int(_non_silent[0] - int(0.15 * _sr))
+                    if _trim_start > 0:
+                        _data = _data[_trim_start:]
+                        _buf = io.BytesIO()
+                        sf.write(_buf, _data, _sr, format="WAV", subtype="PCM_16")
+                        wav_data = _buf.getvalue()
+                        print(f"  [tts] 裁剪前导静音: {_lead_ms:.0f}ms → 150ms")
+        except Exception as _trim_e:
+            print(f"  [tts] 裁剪前导静音失败: {_trim_e}")
+
+        # 时长对齐（仅在 stretch_to_target=True 时拉伸)
+        if target_duration_ms is not None and target_duration_ms > 0 and stretch_to_target:
+            wav_data = _adjust_duration(wav_data, target_duration_ms, target_chars=len(text))
+            print(f"  [tts] 时长对齐到 {target_duration_ms}ms")
+
+        # 输出到指定路径
+        if output_path:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(wav_data)
+            print(f"  [tts] 已保存到: {os.path.basename(output_path)}")
+
+        return wav_data
 
     except Exception as e:
         print(f"  [tts] 合成失败: {e}")
