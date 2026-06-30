@@ -365,6 +365,17 @@ class SubStep(BaseStep):
                 ctx.subs = subs
                 self._save_calib_cache(ctx)
 
+        # 保存校准后的 ASR 字幕 (asr_calib.srt)
+        if ctx.raw_subs:
+            _calib_entries = [
+                (s.calib_start_ms or s.start_ms,
+                 s.calib_end_ms or s.end_ms,
+                 s.text)
+                for s in ctx.raw_subs
+            ]
+            from .srt_parser import write_srt as _ws
+            _ws(_calib_entries, ctx.cache.get_path(Step.SUBS, "asr_calib.srt"))
+
         # 4. 性别检测（独立缓存检查)
         _has_gender, _, _ = ctx.cache.file_info(Step.SUBS, "genders_cache.json")
         if _has_gender:
