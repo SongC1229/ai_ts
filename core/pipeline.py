@@ -365,7 +365,7 @@ class SubStep(BaseStep):
                 ctx.subs = subs
                 self._save_calib_cache(ctx)
 
-        # 保存校准后的 ASR 字幕 (asr_calib.srt)
+        # 保存校准后的 ASR 字幕 (asr_calib.srt, 供调试对比)
         if ctx.raw_subs:
             _calib_entries = [
                 (s.calib_start_ms or s.start_ms,
@@ -680,24 +680,17 @@ class SubStep(BaseStep):
             corrected_times, seg_texts, has_changes = _wa.align_subs(
                 subs, _send_ranges, ctx, words, segments)
 
-            # 保存词级时间戳映射 (whisper.word.srt)
+            # 用 Whisper 词级文本更新 raw_subs.text
             try:
                 import bisect as _b
                 _ws_starts = [w["start_ms"] for w in words]
-                _word_entries = []
-                for sub in subs:
+                for sub in ctx.raw_subs:
                     win_s, win_e, _, _ = _send_ranges[sub.idx - 1]
                     _lo = _b.bisect_left(_ws_starts, win_s)
                     _hi = _b.bisect_right(_ws_starts, win_e)
                     _ww = words[_lo:_hi]
                     if _ww:
-                        _word_entries.append((
-                            _ww[0]["start_ms"], _ww[-1]["end_ms"],
-                            "".join(w["word"] for w in _ww)))
-                    else:
-                        _word_entries.append((sub.start_ms, sub.end_ms, ""))
-                _rws(_word_entries,
-                     os.path.join(ctx.cache.cache_dir, "whisper.word.srt"))
+                        sub.text = "".join(w["word"] for w in _ww)
             except Exception:
                 pass
 
