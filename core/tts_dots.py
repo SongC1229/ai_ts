@@ -94,6 +94,9 @@ class _DotsTtsHolder(MLModelHolder):
 
 # ── 便利入口函数 ──
 
+_speaker_emb_cache = {}  # .pt路径 -> 已加载的 dict
+
+
 def load_dots_engine(device: str = "auto", dtype: str = "bfloat16"):
     return _DotsTtsHolder.load(device=device, dtype=dtype)
 
@@ -140,7 +143,8 @@ def _adjust_duration(wav_bytes: bytes, target_duration_ms: int, sample_rate: int
 # ── 说话人嵌入训练 ──
 
 def train_speaker_embedding(clip_paths: list, output_path: str,
-                            device: str = "auto", dtype: str = "bfloat16") -> str:
+                            device: str = "auto", dtype: str = "bfloat16",
+                            **kwargs) -> str:
     """拼接多条参考音频,提取 dots.tts 说话人特征
 
     Args:
@@ -175,15 +179,15 @@ def train_speaker_embedding(clip_paths: list, output_path: str,
     combined = np.concatenate(all_audio)
     audio_t = torch.from_numpy(combined).float().unsqueeze(0)  # [1, T]
 
-    # 2. 通过模型提取说话人嵌入
+    # 2. 通过模型内置 speaker encoder 提取嵌入
     runtime = load_dots_engine(device=device, dtype=dtype)
-    if hasattr(runtime, 'encode_speaker'):
-        _emb = runtime.encode_speaker(audio_t, sr)
-    elif hasattr(runtime, 'model') and hasattr(runtime.model, 'speaker_encoder'):
-        _dev = next(runtime.model.parameters()).device
-        _emb = runtime.model.speaker_encoder(audio_t.to(_dev))
+    model = runtime.model
+    if hasattr(model, 'xvector_extractor') and model.xvector_extractor is not None:
+        _dev = next(model.parameters()).device
+        audio_t = audio_t.to(_dev)
+        _emb = model.xvector_extractor(audio_t)
     else:
-        raise RuntimeError("dots.tts 运行时没有公开的 speaker encoder API")
+        raise RuntimeError("dots.tts 模型没有 xvector_extractor")
 
     torch.save({"speaker_embedding": _emb.detach().cpu()}, output_path)
     print(f"  [dots_tts] 说话人特征已保存 ({len(clip_paths)} 条音频拼接, "
@@ -253,6 +257,25 @@ def tts_synthesize(
         except Exception as e:
             print(f"  [dots_tts] 模型加载失败: {e}")
             return None
+
+        # 说话人嵌入注入: 如果有预训练的 .pt,覆盖 xvector_extractor
+        _pt_path = generation_kwargs.pop('_emb_path_hint', '')
+        if _pt_path and os.path.exists(_pt_path):
+            if _pt_path not in _speaker_emb_cache:
+                try:
+                    _pt_data = torch.load(_pt_path)
+                    if "speaker_embedding" in _pt_data:
+                        _speaker_emb_cache[_pt_path] = _pt_data
+                except Exception:
+                    pass
+            _cached = _speaker_emb_cache.get(_pt_path)
+            if _cached and "speaker_embedding" in _cached:
+                print(f"  [dots_tts] 音色权重: {os.path.basename(_pt_path)}")
+                _emb = _cached["speaker_embedding"]
+                model = runtime.model
+                _dev = next(model.xvector_extractor.parameters()).device
+                _cached_emb = _emb.to(_dev)
+                model.xvector_extractor.forward = lambda *a, _e=_cached_emb: _e
 
         # 合成
         t0 = time.time()

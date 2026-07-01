@@ -1726,8 +1726,7 @@ def synthesize_tts_segment(
                 _emb_path = getattr(tts_cfg, _emb_key, '') or ''
                 if _emb_path and os.path.exists(_emb_path):
                     _kwargs["_emb_path_hint"] = _emb_path
-                else:
-                    _kwargs["ref_audio_path"] = ref_audio
+                _kwargs["ref_audio_path"] = ref_audio
             else:
                 _kwargs["ref_audio_path"] = ref_audio
             # 情绪参考(固定提示音和人声模式都需要)
