@@ -135,7 +135,7 @@ class ExecutionMixin:
         raw_src_srt = self.src_srt_path_edit.text().strip()
         if raw_src_srt and os.path.exists(raw_src_srt):
             self.log(f"原声字幕: {Path(raw_src_srt).name}")
-        _tts_mode = "本地引擎(IndexTTS2)" if self.cfg.use_local_tts else \
+        _tts_mode = "本地引擎" if self.cfg.use_local_tts else \
                     f"API: {self.cfg.tts_api_url} ({self.cfg.tts_mode})"
         self.log(f"TTS: {_tts_mode}")
 

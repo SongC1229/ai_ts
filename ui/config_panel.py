@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QLineEdit, QCheckBox, QLabel,
 )
+from PySide6.QtCore import Signal
 
 
 @dataclass
@@ -47,6 +48,8 @@ _ITEMS: List[_Item] = [
 
 class ConfigPanel(QWidget):
     """通用配置面板 — 下拉选配置项 + 动态控件"""
+
+    value_changed = Signal(str, object)  # key, new_value
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -136,8 +139,10 @@ class ConfigPanel(QWidget):
 
     def _emit_changed(self, key, value):
         setattr(self._cfg, key, value)
+        self.value_changed.emit(key, value)
 
     def _on_changed_bool(self, key, checked):
         setattr(self._cfg, key, checked)
+        self.value_changed.emit(key, checked)
         if isinstance(self._current_widget, QCheckBox):
             self._current_widget.setText("开启" if checked else "关闭")

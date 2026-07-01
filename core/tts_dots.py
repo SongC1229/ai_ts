@@ -137,6 +137,60 @@ def _adjust_duration(wav_bytes: bytes, target_duration_ms: int, sample_rate: int
     return buf.getvalue()
 
 
+# ── 说话人嵌入训练 ──
+
+def train_speaker_embedding(clip_paths: list, output_path: str,
+                            device: str = "auto", dtype: str = "bfloat16") -> str:
+    """拼接多条参考音频,提取 dots.tts 说话人特征
+
+    Args:
+        clip_paths: 音频文件路径列表
+        output_path: 输出 .dots.pt 文件路径
+        device: 推理设备
+        dtype: 精度
+
+    Returns:
+        output_path (写入的 .dots.pt 文件路径)
+    """
+    import numpy as np
+    import torch
+
+    if not clip_paths:
+        raise ValueError("clip_paths 为空")
+
+    # 1. 拼接所有音频片段（不限长）
+    all_audio = []
+    sr = 24000
+    for path in clip_paths:
+        if not os.path.exists(path):
+            print(f"  [dots_tts] 跳过不存在的音频: {path}")
+            continue
+        data, file_sr = sf.read(path)
+        if file_sr != sr:
+            import librosa
+            data = librosa.resample(data, orig_sr=file_sr, target_sr=sr)
+        all_audio.append(data)
+    if not all_audio:
+        raise RuntimeError("没有有效的音频文件用于训练")
+    combined = np.concatenate(all_audio)
+    audio_t = torch.from_numpy(combined).float().unsqueeze(0)  # [1, T]
+
+    # 2. 通过模型提取说话人嵌入
+    runtime = load_dots_engine(device=device, dtype=dtype)
+    if hasattr(runtime, 'encode_speaker'):
+        _emb = runtime.encode_speaker(audio_t, sr)
+    elif hasattr(runtime, 'model') and hasattr(runtime.model, 'speaker_encoder'):
+        _dev = next(runtime.model.parameters()).device
+        _emb = runtime.model.speaker_encoder(audio_t.to(_dev))
+    else:
+        raise RuntimeError("dots.tts 运行时没有公开的 speaker encoder API")
+
+    torch.save({"speaker_embedding": _emb.detach().cpu()}, output_path)
+    print(f"  [dots_tts] 说话人特征已保存 ({len(clip_paths)} 条音频拼接, "
+          f"{len(combined)/sr:.1f}s): {output_path}")
+    return output_path
+
+
 # ── 主合成函数 ──
 
 def tts_synthesize(

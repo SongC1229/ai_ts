@@ -185,10 +185,6 @@ def train_speaker_embedding(clip_paths: list, output_path: str,
     if not all_audio:
         raise RuntimeError("没有有效的音频文件用于训练")
     combined = np.concatenate(all_audio)
-    # 限制最长 15 秒
-    max_samples = 15 * sr
-    if len(combined) > max_samples:
-        combined = combined[:max_samples]
     audio_t = torch.from_numpy(combined).float().unsqueeze(0)  # [1, T]
 
     # 2. 提取所有特征（audio 保持在 CPU,按需移入 GPU)

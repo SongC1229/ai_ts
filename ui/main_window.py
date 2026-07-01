@@ -36,8 +36,16 @@ from config import cfg
 from core.cache_manager import Step
 
 
+# 说话人嵌入后缀：引擎模式 → 文件后缀
+def _speaker_emb_suffix(mode: str = None) -> str:
+    """根据引擎模式返回音色文件后缀"""
+    if mode is None:
+        mode = cfg.tts_local_mode
+    return ".index.pt" if mode == "indextts" else ".dots.pt"
+
+
 class _AutoRefreshCombo(QComboBox):
-    """打开下拉时自动扫描 role 目录刷新 .pt 列表"""
+    """打开下拉时自动扫描 role 目录刷新音色文件列表（后缀由当前引擎决定）"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self._main = parent
@@ -52,10 +60,8 @@ class _AutoRefreshCombo(QComboBox):
         role_dir = os.path.join(os.getcwd(), "role")
         os.makedirs(role_dir, exist_ok=True)
         for f in sorted(os.listdir(role_dir)):
-            if f.endswith(".pt"):
+            if f.endswith(_speaker_emb_suffix()):
                 self.addItem(f)
-        _restore = current
-        idx = self.findText(_restore) if _restore else -1
         idx = self.findText(current)
         if idx >= 0:
             self.setCurrentIndex(idx)
@@ -257,7 +263,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self.api_url_edit.setPlaceholderText("http://localhost:9001")
         self.api_url_edit.setText(cfg.tts_api_url)
         cfg_grid.addWidget(self.api_url_edit, 0, 1)
-        self.local_tts_cb = QCheckBox("本地引擎 (IndexTTS2)")
+        self.local_tts_cb = QCheckBox("本地引擎")
         self.local_tts_cb.setChecked(cfg.use_local_tts)
         self.local_tts_cb.toggled.connect(self._on_local_tts_toggled)
         cfg_grid.addWidget(self.local_tts_cb, 0, 2)
@@ -279,6 +285,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         cfg_grid.addWidget(self.btn_settings, 1, 2, Qt.AlignRight | Qt.AlignVCenter)
         from ui.config_panel import ConfigPanel
         self.config_panel = ConfigPanel(cfg)
+        self.config_panel.value_changed.connect(self._on_config_value_changed)
         cfg_grid.addWidget(self.config_panel, 2, 0, 1, 3)
         cfg_widget = QWidget()
         cfg_widget.setLayout(cfg_grid)
@@ -872,8 +879,15 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         setattr(cfg, f"fixed_ref_audio_{gender}", path)
         self.log(f"  固定提示音({gender}): {path}")
     def _refresh_speaker_emb_list(self):
-        self.speaker_emb_male._refresh_items()
-        self.speaker_emb_female._refresh_items()
+        """刷新音色下拉列表（按当前引擎后缀过滤）"""
+        for _c in (self.speaker_emb_male, self.speaker_emb_female):
+            _c._refresh_items()
+    def _on_config_value_changed(self, key, value):
+        """配置面板值变更回调"""
+        if key == "tts_local_mode":
+            # 引擎切换 → 刷新音色列表过滤后缀
+            self._refresh_speaker_emb_list()
+            self.log(f"  本地引擎模式切换: {value}")
     def _on_speaker_emb_changed_male(self, idx): pass
 
     def _on_speaker_emb_changed_female(self, idx): pass  # 选择在 _refresh_worker_ctx_config 中传递到 pipeline
@@ -949,18 +963,25 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             shutil.rmtree(tmp_dir, ignore_errors=True)
             return
         try:
-            from core.tts_indextts2 import train_speaker_embedding
+            # 根据当前引擎选择训练模块和后缀
+            _engine = self.cfg.tts_local_mode  # "indextts" | "dots"
+            if _engine == "dots":
+                from core.tts_dots import train_speaker_embedding
+                _suffix = ".dots.pt"
+            else:
+                from core.tts_indextts2 import train_speaker_embedding
+                _suffix = ".index.pt"
             name, ok = QInputDialog.getText(self, "训练音色", "音色名称：", text="")
             if not ok or not name.strip():
                 self.lbl_cache_status.setText("训练已取消")
                 return
-            name = name.strip() + ".pt"
+            name = name.strip() + _suffix
             out_path = os.path.join(os.getcwd(), "role", name)
-            self.log(f"  训练说话人嵌入 ({len(clip_paths)} 条音频)...")
+            self.log(f"  训练说话人嵌入 ({len(clip_paths)} 条音频, 引擎={_engine})...")
             self.lbl_cache_status.setText("正在训练音色...")
             QApplication.processEvents()
             train_speaker_embedding(clip_paths, out_path)
-            self._refresh_speaker_emb_list()
+            # 刷新音色下拉
             for _c in (self.speaker_emb_male, self.speaker_emb_female):
                 _c._refresh_items()
             for _c in (self.speaker_emb_male, self.speaker_emb_female):
@@ -968,7 +989,6 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
                     if _c.itemText(i) == name:
                         _c.setCurrentIndex(i)
                         break
-                    break
             self.log(f"  音色已保存: {name}")
             self.lbl_cache_status.setText(f"音色已训练: {name} ({len(clip_paths)} 条)")
         except Exception as e:
