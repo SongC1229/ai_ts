@@ -1,8 +1,14 @@
 """SenseVoice ASR 模型加载 — 供 pipeline _generate_asr_srt 使用"""
 
+import logging
 import os
 
 import core.editdistance_fallback  # noqa: F401
+
+# 压住 funasr / modelscope 的内部注册噪声
+for _name in ('funasr', 'funasr.utils', 'funasr.auto', 'funasr.models',
+              'modelscope', 'modelscope.utils', 'ms'):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 _asr_model = None
 
