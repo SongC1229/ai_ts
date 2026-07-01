@@ -93,6 +93,12 @@ class PlaybackMixin:
         self.waveform_preview.setEnabled(True)
         if label and row is not None:
             dur_s = (end_ms - start_ms) / 1000 if end_ms > start_ms else 0
+            if dur_s <= 0 and os.path.exists(file_path):
+                try:
+                    from core.audio_tools import get_audio_info
+                    dur_s = get_audio_info(file_path).duration_ms / 1000 or 0
+                except Exception:
+                    pass
             self.log(f"▶ {label}试听: 第{row+1}行 {self._fmt_time(start_ms)} ({dur_s:.1f}s)")
             self._load_waveform_preview(file_path, start_ms, end_ms if end_ms > 0 else None)
         else:

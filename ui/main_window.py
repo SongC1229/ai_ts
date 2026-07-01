@@ -58,7 +58,7 @@ class _AutoRefreshCombo(QComboBox):
         os.makedirs(role_dir, exist_ok=True)
         for f in sorted(os.listdir(role_dir)):
             if f.endswith(".index.pt"):
-                self.addItem(f)
+                self.addItem(f.replace(".index.pt", ""))
         idx = self.findText(current)
         if idx >= 0:
             self.setCurrentIndex(idx)
@@ -919,13 +919,13 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             return
         subs = []
         for r in range(self.subtitle_table.model().rowCount()):
-            idx = self._row_to_idx.get(r)
-            if idx is not None:
-                for _sr in range(self._subtitle_model.rowCount()):
-                    _s = self._subtitle_model.get_subtitle(_sr)
-                    if _s and _s.idx == idx and _s.text and _s.eff_start_ms:
-                        subs.append(_s)
-                        break
+            proxy_idx = self._gender_proxy.index(r, 0)
+            src_row = self._gender_proxy.mapToSource(proxy_idx).row()
+            _s = self._subtitle_model.get_subtitle(src_row)
+            if _s and _s.text and _s.eff_start_ms:
+                subs.append(_s)
+                print(f"  [train]  字幕 {_s.idx} ({_s.gender}): \"{_s.text[:20]}...\"")
+                continue
         if len(subs) < 3:
             QMessageBox.warning(self, "训练音色", f"至少需要 3 条有文本的字幕（当前 {len(subs)} 条）")
             return
@@ -1002,13 +1002,14 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         def _on_train_done(result):
             status = result[0] if result else "error"
             if status == "ok":
+                # 清除该文件在引擎中的缓存,避免加载旧数据
+                try:
+                    from core.tts_indextts2 import _speaker_emb_cache
+                    _speaker_emb_cache.pop(out_path, None)
+                except Exception:
+                    pass
                 for _c in (self.speaker_emb_male, self.speaker_emb_female):
                     _c._refresh_items()
-                for _c in (self.speaker_emb_male, self.speaker_emb_female):
-                    for i in range(_c.count()):
-                        if _c.itemText(i) == name:
-                            _c.setCurrentIndex(i)
-                            break
                 self.log(f"  音色已保存: {name}")
                 self.lbl_cache_status.setText(f"音色已训练: {name}")
             else:

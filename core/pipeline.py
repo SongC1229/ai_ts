@@ -1690,7 +1690,8 @@ def synthesize_tts_segment(
                 _emb_path = getattr(tts_cfg, _emb_key, '') or ''
                 if _emb_path and os.path.exists(_emb_path):
                     _kwargs["_emb_path_hint"] = _emb_path
-                _kwargs["ref_audio_path"] = ref_audio
+                else:
+                    _kwargs["ref_audio_path"] = ref_audio
             else:
                 _kwargs["ref_audio_path"] = ref_audio
             # 情绪参考(固定提示音和人声模式都需要)
@@ -2384,6 +2385,25 @@ def regen_single_tts(
         )
         # 注：交叉淡变宽度在重新拼接(remix_from_cache)时由 splice 实际计算并打印,
         # 此处单条片段尚未拼接、无法预知真实淡变,故不再输出易误解的 mix 偏移行。
+
+        # 输出混音日志 (与 AudioMixAndMergeStep 一致)
+        if trim_info:
+            from .utils import fmt_time as _t
+            _tts_raw = int(trim_info.get('speech_start_ms', 0))
+            _tts_lead = int(trim_info.get('leading_trimmed_ms', 0))
+            _tts_speech = max(0, _tts_raw - _tts_lead)
+            _fade_in_abs = start_ms + _tts_speech
+            _tts_dur = int(trim_info.get('duration_ms', end_ms - start_ms))
+            _fade_out_abs = start_ms + _tts_dur - _tts_lead
+            _fade_out_offset = _fade_out_abs - end_ms
+            _raw_tail = f"时长{(end_ms - start_ms)/1000:.3f}s"
+            _raw_part1 = f"{idx:>3d} raw: 字幕开始= {_t(start_ms)}"
+            _raw_part2 = f"字幕结束= {_t(end_ms)}"
+            _log(f"{_raw_part1:<42s}{_raw_part2:<28s}  {_raw_tail}")
+            _tts_tail = f"时长{(_fade_out_abs - _fade_in_abs)/1000:.3f}s"
+            _tts_part1 = f"    tts: 淡入开始= {_t(_fade_in_abs)}({_tts_speech:+5d}ms)"
+            _tts_part2 = f"淡出结束= {_t(_fade_out_abs)}({_fade_out_offset:+5d}ms)"
+            _log(f"{_tts_part1:<42s}{_tts_part2:<28s}  {_tts_tail}")
 
         # 清理临时文件（不含 _ref_ 参考音频,保留供下次复用)
         for tmp in [vocals_ref, aligned_path, gain_path, padded_path]:

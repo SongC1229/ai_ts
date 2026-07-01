@@ -76,7 +76,7 @@ class ExecutionMixin:
         ctx.keep_temp = self.keep_temp_cb.isChecked()
         # 说话人嵌入路径来自 UI 当前选择
         _get_emb = lambda combo: (
-            os.path.join(os.getcwd(), "role", combo.currentText())
+            os.path.join(os.getcwd(), "role", combo.currentText() + ".index.pt")
             if combo.currentIndex() > 0 else "")
         ctx.speaker_embedding_path_male = _get_emb(
             getattr(self, 'speaker_emb_male', None) or type('o',(),{'currentIndex':lambda:0})())
@@ -274,9 +274,7 @@ class ExecutionMixin:
             _combo = getattr(self, f'speaker_emb_{_g}', None)
             if _combo and _combo.currentIndex() > 0:
                 _settings[f'speaker_embedding_path_{_g}'] = os.path.join(
-                    os.getcwd(), "role", _combo.currentText())
-            else:
-                _settings[f'speaker_embedding_path_{_g}'] = ""
+                    os.getcwd(), "role", _combo.currentText() + ".index.pt")
 
         t = TaskThread(
             target=regen_single_tts,

@@ -397,6 +397,14 @@ def tts_synthesize(
             _cached = _speaker_emb_cache.get(_emb_hint)
             if _cached and "speaker_embedding" in _cached:
                 model = _IndexTTSHolder.load(device=device, dtype=dtype)
+                # 不同 .pt 时清除旧缓存
+                if getattr(model, '_last_pt_path', None) != _emb_hint:
+                    model.cache_spk_cond = None
+                    model.cache_s2mel_style = None
+                    model.cache_s2mel_prompt = None
+                    model.cache_mel = None
+                    model._last_pt_path = _emb_hint
+                    torch.cuda.empty_cache()
                 _dev = model.device if hasattr(model, 'device') else next(model.parameters()).device
                 model.cache_spk_cond = _cached["spk_cond_emb"].to(_dev)
                 model.cache_s2mel_style = _cached["speaker_embedding"].to(_dev)
