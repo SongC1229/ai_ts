@@ -35,7 +35,6 @@ class SettingsDialog(QDialog):
         preset_layout.addWidget(QLabel("预设方案:"))
         self.preset_combo = QComboBox()
         self.preset_combo.addItem("手动配置")
-        self.preset_combo.addItem("雨落版 dots.tts")
         self.preset_combo.addItem("CosyVoice (本地)")
         self.preset_combo.addItem("GPT-SoVITS")
         self.preset_combo.addItem("OpenAI TTS")
@@ -320,11 +319,7 @@ class SettingsDialog(QDialog):
     def _on_preset_changed(self, preset: str):
         """预设方案切换"""
         presets = {
-            "雨落版 dots.tts": {
-                "mode": "rainfall",
-                "model": "",
-                "language": "zh",
-            },
+
             "CosyVoice (本地)": {
                 # "url": "http://localhost:5000/api/tts",
                 "mode": "cosyvoice",

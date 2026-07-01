@@ -1152,15 +1152,14 @@ class TTSSynthesisStep(BaseStep):
                     try:
                         tts_cfg = _ctx_to_tts_config(ctx)
                         tts_cfg.api_url = api_url  # 可能被端口分配覆盖
-                        # 从原声字幕取文本作为 dots 的 prompt_text
-                        if tts_cfg.tts_local_mode == "dots":
-                            if tts_cfg.use_fixed_ref:
-                                tts_cfg.prompt_text = ctx.fixed_ref_text_female if sub.gender == "female" else ctx.fixed_ref_text_male
-                            elif hasattr(ctx, 'raw_subs') and ctx.raw_subs:
-                                for _rs in ctx.raw_subs:
-                                    if _rs.idx == sub.idx:
-                                        tts_cfg.prompt_text = _rs.text or ""
-                                        break
+                        # 从原声字幕取文本作为 prompt_text
+                        if tts_cfg.use_fixed_ref:
+                            tts_cfg.prompt_text = ctx.fixed_ref_text_female if sub.gender == "female" else ctx.fixed_ref_text_male
+                        elif hasattr(ctx, 'raw_subs') and ctx.raw_subs:
+                            for _rs in ctx.raw_subs:
+                                if _rs.idx == sub.idx:
+                                    tts_cfg.prompt_text = _rs.text or ""
+                                    break
                         tts_path = synthesize_tts_segment(
                             sub,
                             cache=ctx.cache, work_dir=ctx.work_dir,
@@ -1527,7 +1526,7 @@ def _safe_edge(ctx: PipelineContext, idx: int, start_ms: int, end_ms: int,
 class TTSConfig:
     """TTS 合成配置"""
     use_local_tts: bool = False             # 使用本地引擎
-    tts_local_mode: str = "indextts"        # indextts | dots
+    tts_local_mode: str = "indextts"
     api_url: str = "http://localhost:9001"
     api_key: str = ""
     mode: str = "rainfall"
@@ -1542,12 +1541,7 @@ class TTSConfig:
     fixed_ref_audio_male: str = ""
     fixed_ref_audio_female: str = ""
     vocals_path: str = ""
-    prompt_text: str = ""                   # 原声字幕文本(dots 续读对齐用)
-    # dots.tts 参数
-    dots_num_steps: int = 10
-    dots_guidance_scale: float = 1.2
-    dots_speaker_scale: float = 1.5
-    dots_precision: str = "bfloat16"
+    prompt_text: str = ""                   # 原声字幕文本
 
     @classmethod
     def from_ctx(cls, ctx) -> 'TTSConfig':
@@ -1567,10 +1561,6 @@ class TTSConfig:
             speaker_embedding_path_female=getattr(ctx, 'speaker_embedding_path_female', ''),
             vocals_path=ctx.vocals_path,
             prompt_text=getattr(ctx, 'prompt_text', ''),
-            dots_num_steps=getattr(ctx, 'dots_num_steps', 10),
-            dots_guidance_scale=getattr(ctx, 'dots_guidance_scale', 1.2),
-            dots_speaker_scale=getattr(ctx, 'dots_speaker_scale', 1.5),
-            dots_precision=getattr(ctx, 'dots_precision', 'bfloat16'),
         )
 
     @classmethod
@@ -1595,10 +1585,6 @@ class TTSConfig:
             speaker_embedding_path_female=d.get("speaker_embedding_path_female", _defaults.speaker_embedding_path_female),
             vocals_path=d.get("vocals_path", _defaults.vocals_path),
             prompt_text=d.get("prompt_text", _defaults.prompt_text),
-            dots_num_steps=d.get("dots_num_steps", _defaults.dots_num_steps),
-            dots_guidance_scale=d.get("dots_guidance_scale", _defaults.dots_guidance_scale),
-            dots_speaker_scale=d.get("dots_speaker_scale", _defaults.dots_speaker_scale),
-            dots_precision=d.get("dots_precision", _defaults.dots_precision),
         )
 
 
@@ -1683,34 +1669,12 @@ def synthesize_tts_segment(
     tts_path = cache.tts_path(sub)
 
     if tts_cfg.use_local_tts:
-        # 本地 TTS 引擎（indextts / dots)
-        if tts_cfg.tts_local_mode == "dots":
-            # 切换 dots 前卸载 IndexTTS2
-            try:
-                from .tts_indextts2 import unload_tts_engine as _unload_indextts
-                _unload_indextts()
-            except Exception:
-                pass
-            from .tts_dots import tts_synthesize as _local_tts
-            _local_kw = dict(
-                num_steps=tts_cfg.dots_num_steps,
-                guidance_scale=tts_cfg.dots_guidance_scale,
-                speaker_scale=tts_cfg.dots_speaker_scale,
-                dtype=tts_cfg.dots_precision,
-                prompt_text=tts_cfg.prompt_text,
-            )
-        else:
-            # 切换 indextts 前卸载 dots
-            try:
-                from .tts_dots import unload_dots_engine as _unload_dots
-                _unload_dots()
-            except Exception:
-                pass
-            from .tts_indextts2 import tts_synthesize as _local_tts
-            _local_kw = {}
+        # 本地 TTS 引擎
+        from .tts_indextts2 import tts_synthesize as _local_tts
+        _local_kw = {}
 
         _target_ms = end_ms - start_ms + 500  # 多生成一点余量,VAD 修剪后不会截断
-        _log(f"  TTS {idx} 开始: (本地引擎 {tts_cfg.tts_local_mode}, 目标 {_target_ms}ms)")
+        _log(f"  TTS {idx} 开始: (本地引擎 indextts, 目标 {_target_ms}ms)")
         try:
             _kwargs = dict(
                 text=txt,

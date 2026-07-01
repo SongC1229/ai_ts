@@ -38,10 +38,7 @@ from core.cache_manager import Step
 
 # 说话人嵌入后缀：引擎模式 → 文件后缀
 def _speaker_emb_suffix(mode: str = None) -> str:
-    """根据引擎模式返回音色文件后缀"""
-    if mode is None:
-        mode = cfg.tts_local_mode
-    return ".index.pt" if mode == "indextts" else ".dots.pt"
+    return ".index.pt"
 
 
 class _AutoRefreshCombo(QComboBox):
@@ -60,7 +57,7 @@ class _AutoRefreshCombo(QComboBox):
         role_dir = os.path.join(os.getcwd(), "role")
         os.makedirs(role_dir, exist_ok=True)
         for f in sorted(os.listdir(role_dir)):
-            if f.endswith(_speaker_emb_suffix()):
+            if f.endswith(".index.pt"):
                 self.addItem(f)
         idx = self.findText(current)
         if idx >= 0:
@@ -982,14 +979,8 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             QMessageBox.warning(self, "训练音色", "音频提取失败")
             shutil.rmtree(tmp_dir, ignore_errors=True)
             return
-        # 根据当前引擎选择训练模块和后缀
-        _engine = self.cfg.tts_local_mode  # "indextts" | "dots"
-        if _engine == "dots":
-            from core.tts_dots import train_speaker_embedding
-            _suffix = ".dots.pt"
-        else:
-            from core.tts_indextts2 import train_speaker_embedding
-            _suffix = ".index.pt"
+        from core.tts_indextts2 import train_speaker_embedding
+        _suffix = ".index.pt"
         name, ok = QInputDialog.getText(self, "训练音色", "音色名称：", text="")
         if not ok or not name.strip():
             self.lbl_cache_status.setText("训练已取消")
@@ -1001,7 +992,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         # 后台线程训练,不阻塞 UI
         from ui.pipeline_worker import TaskThread
         self.lbl_cache_status.setText("正在训练音色...")
-        self.log(f"  训练说话人嵌入 ({len(clip_paths)} 条音频, 引擎={_engine})...")
+        self.log(f"  训练说话人嵌入 ({len(clip_paths)} 条音频)...")
         self._train_thread = TaskThread(
             target=train_speaker_embedding,
             args=[clip_paths, out_path],

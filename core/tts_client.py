@@ -107,7 +107,6 @@ class TTSClient:
             "text": text,
             "prompt_path": prompt_path,
         }
-        # 传递语言参数（dots.tts 支持 language 参数)
         if self.language and self.language != "auto":
             params["language"] = self.language
         # 合并额外参数（如 seed)

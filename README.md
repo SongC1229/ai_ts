@@ -44,7 +44,6 @@ pip install uv
 #     B) 部署 TTS API 服务（任选其一）：
 #        - CosyVoice:   https://github.com/FunAudioLLM/CosyVoice
 #        - GPT-SoVITS:  https://github.com/RVC-Boss/GPT-SoVITS
-#        - dots.tts:    https://github.com/rednote-hilab/dots.tts
 #        - OpenAI TTS:  兼容 OpenAI 格式的服务
 ```
 

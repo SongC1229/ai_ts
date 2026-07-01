@@ -20,11 +20,6 @@ class Cfg:
         self.use_fixed_ref = False
         self.send_prompt_text = False
 
-        # ── dots.tts 引擎参数 ──
-        self.dots_num_steps = 10
-        self.dots_guidance_scale = 1.2
-        self.dots_speaker_scale = 1.5
-        self.dots_precision = "bfloat16"   # bfloat16 | float16
 
         # ── Demucs ──
         self.demucs_model = "htdemucs"

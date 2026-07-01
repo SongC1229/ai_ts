@@ -253,7 +253,7 @@ class ExecutionMixin:
                 self._update_cache_status()
                 self._process_regen_queue()
                 return
-        # 取原声字幕文本（dots prompt_text 用)
+        # 取原声字幕文本
         _prompt_text = ""
         if hasattr(self, '_src_subs') and self._src_subs:
             for _s in self._src_subs:

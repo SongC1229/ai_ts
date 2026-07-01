@@ -29,7 +29,7 @@ class _Item:
 # 配置项定义
 _ITEMS: List[_Item] = [
     # ── 本地引擎 ──
-    _Item("tts_local_mode",             "本地引擎模式",      "choice", choices=["indextts", "dots"]),
+    _Item("tts_local_mode",             "本地引擎模式",      "choice", choices=["indextts"]),
 
     # ── Whisper 校准参数 ──
     _Item("whisper_vad_filter",         "Whisper VAD",       "bool"),
