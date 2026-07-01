@@ -67,7 +67,7 @@ def read_wav_segment(path: str, start_ms: int, end_ms: int = None, mono: bool = 
         sr = f.samplerate
         total_frames = len(f)
         start_frame = int(start_ms * sr / 1000)
-        end_frame = int(end_ms * sr / 1000) if end_ms else total_frames
+        end_frame = int(end_ms * sr / 1000) if end_ms is not None else total_frames
         start_frame = max(0, min(start_frame, total_frames))
         end_frame = max(start_frame, min(end_frame, total_frames))
         if end_frame <= start_frame:

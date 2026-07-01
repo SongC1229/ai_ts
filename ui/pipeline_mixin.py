@@ -133,7 +133,7 @@ class PipelineMixin:
             row = self.subtitle_row_map.get(idx)
             if row is None:
                 continue
-            if cm and idx <= len(self.current_subtitles):
+            if cm and 1 <= idx <= len(self.current_subtitles):
                 sub = self.current_subtitles[idx - 1]
                 if sub:
                     mixed_path = cm.mixed_path(sub)

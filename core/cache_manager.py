@@ -133,7 +133,11 @@ class CacheManager:
         if not self._info.get(step_name, False):
             return False
         for fn in self.STEP_CHECK_FILES.get(step_name, []):
-            if not os.path.exists(os.path.join(self.cache_dir, step_name, fn)):
+            _path = os.path.join(self.cache_dir, step_name, fn)
+            if '*' in fn or '?' in fn:
+                if not list(glob.iglob(_path)):
+                    return False
+            elif not os.path.exists(_path):
                 return False
         return True
 
@@ -265,7 +269,7 @@ class CacheManager:
         except (json.JSONDecodeError, OSError):
             return False
 
-        calib_map = {c['idx']: c for c in calib_list if c.get('idx')}
+        calib_map = {c['idx']: c for c in calib_list if 'idx' in c}
 
         for sub in (subs or []):
             c = calib_map.get(sub.idx)
