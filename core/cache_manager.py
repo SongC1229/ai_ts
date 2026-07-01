@@ -325,7 +325,11 @@ class CacheManager:
         """查找指定 idx 的原始 TTS 文件路径,不存在返回空字符串"""
         tts_dir = self.get_step_dir("tts")
         matches = glob.glob(os.path.join(tts_dir, f"tts_{idx:04d}_*.wav"))
-        return matches[0] if matches else ""
+        if not matches:
+            return ""
+        # 校准时间变更后可能残留旧文件,按 mtime 降序取最新
+        matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return matches[0]
 
     def scan_tts_cache(self) -> tuple:
         """预扫描 TTS 目录,返回 (raw_cache, mixed_cache) 两个 {idx: path} 字典"""

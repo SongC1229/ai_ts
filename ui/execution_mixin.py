@@ -85,6 +85,11 @@ class ExecutionMixin:
         return ctx
 
     def _start_dub(self):
+        # 防止 processEvents 重入或快速双击导致重复启动 worker
+        _existing = getattr(self, '_pipeline_worker', None)
+        if _existing and _existing.isRunning():
+            self.log("⚠️ 流水线正在运行,请勿重复启动")
+            return
         video_path = self.video_path_edit.text().strip()
         srt_path = self.srt_path_edit.text().strip()
         output_dir = self.output_dir_edit.text().strip()
@@ -140,9 +145,24 @@ class ExecutionMixin:
         self.log(f"TTS: {_tts_mode}")
 
     def _cancel_dub(self):
-        if getattr(self, '_pipeline_worker', None) and self._pipeline_worker.isRunning():
-            self._pipeline_worker.cancel()
+        _w = getattr(self, '_pipeline_worker', None)
+        if _w and _w.isRunning():
+            _w.cancel()
             self.log("正在取消...")
+            # 唤醒可能阻塞在错误对话框/配置刷新等待上的 worker,使其能响应取消
+            try:
+                _w._error_mutex.lock()
+                _w._error_cond.wakeAll()
+                _w._error_mutex.unlock()
+            except Exception:
+                pass
+            if hasattr(_w, '_config_cond'):
+                try:
+                    _w._config_mutex.lock()
+                    _w._config_cond.wakeAll()
+                    _w._config_mutex.unlock()
+                except Exception:
+                    pass
 
     def _on_step_btn_clicked(self, step_idx: int):
         """点击分段进度中的 ▶ 按钮 → 单独执行某一步"""
@@ -155,6 +175,12 @@ class ExecutionMixin:
 
     def _run_single_step(self, step_idx: int):
         """通用：构建上下文并执行单步"""
+        # 防止 processEvents 重入或快速双击导致重复启动 worker
+        for _attr in ('_pipeline_worker', '_single_step_worker'):
+            _existing = getattr(self, _attr, None)
+            if _existing and _existing.isRunning():
+                self.log(f"⚠️ 任务正在运行,不能单独执行 step {step_idx+1}")
+                return
         video_path = self.video_path_edit.text().strip()
         srt_path = self.srt_path_edit.text().strip()
         ok, _ = self._validate_paths(video_path, srt_path)

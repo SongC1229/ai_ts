@@ -219,6 +219,9 @@ class PipelineMixin:
             self.log(f"✅ {msg}")
         else:
             self.log(f"⛔⛔ {msg}")
+        # 清除已完成 worker 引用,避免陈旧引用干扰后续错误对话框/配置刷新查找
+        if getattr(self, '_single_step_worker', None):
+            self._single_step_worker = None
         self._update_cache_status()
 
     def _on_subtitle_error(self, idx: int, error_msg: str, text: str):
@@ -249,20 +252,24 @@ class PipelineMixin:
         dlg.addButton("⛔ 终止", QMessageBox.ButtonRole.DestructiveRole)
         dlg.setDefaultButton(retry_btn)
         dlg.setModal(False)
+        _choice_made = False  # 标记是否已通过按钮做出选择
 
         def _on_choice(choice: str):
-            try:
-                dlg.close()
-            except Exception:
-                pass
+            nonlocal _choice_made
+            _choice_made = True
             self._tts_error_dlg = None
             _w = getattr(self, '_pipeline_worker', None) or getattr(self, '_single_step_worker', None)
             if _w is None:
                 return
+            # 先设置响应并唤醒,再关闭对话框(close 会同步触发 finished 信号)
             _w._error_mutex.lock()
             _w._error_response = choice
             _w._error_cond.wakeAll()
             _w._error_mutex.unlock()
+            try:
+                dlg.close()
+            except Exception:
+                pass
 
         def _on_btn_clicked(btn):
             role = dlg.buttonRole(btn)
@@ -275,6 +282,9 @@ class PipelineMixin:
 
         dlg.buttonClicked.connect(_on_btn_clicked)
         def _on_finished(_):
+            # 仅在未通过按钮做出选择时(如 Esc/点 X 关闭)兜底为 skip
+            if _choice_made:
+                return
             if self._tts_error_dlg is dlg:
                 self._tts_error_dlg = None
                 _w = getattr(self, '_pipeline_worker', None) or getattr(self, '_single_step_worker', None)

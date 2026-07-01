@@ -161,6 +161,7 @@ def _ensure_server():
             _log(f"等待服务启动 ... ({i+1}s)")
 
     _log(f"API 服务启动超时,请检查 {api_dir}/qwen_api_server.py")
+    _stop_server()
     return False
 
 

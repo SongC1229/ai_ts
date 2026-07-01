@@ -529,6 +529,10 @@ class SubStep(BaseStep):
                         _k_idx = dst_subs[k].idx
                         _qwen_fs = 0
                         le = 0
+                        # 以下四个差值仅在 words 非空且校准成功时赋值,
+                        # 预先置 0 避免 NameError 及跨迭代残留导致日志错位
+                        _qwen_head_diff = _qwen_tail_diff = 0
+                        _qvad_hd = _qvad_td = 0
                         if words:
                             fs = int(words[0]["start_ms"])
                             le = int(words[-1]["end_ms"])
@@ -1729,8 +1733,6 @@ def synthesize_tts_segment(
             # 情绪参考(固定提示音和人声模式都需要)
             if emo_ref_audio and tts_cfg.tts_local_mode == "indextts":
                 _kwargs["emo_audio_path"] = emo_ref_audio
-                if _emb_path and os.path.exists(_emb_path):
-                    _kwargs["_emb_path_hint"] = _emb_path
             _audio_data = _local_tts(**_kwargs)
         except Exception as e:
             raise RuntimeError(f"TTS 合成失败 (第{idx}条): {e}")

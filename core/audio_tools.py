@@ -553,15 +553,14 @@ def match_rms_gain(tts_path: str, ref_vocal_path: str, output_path: str) -> tupl
         y_tts_trim = y_tts[:_min_len]
         y_ref_trim = y_ref[:_min_len]
 
-        # 各自去除静音段,仅在有声部分上对比 RMS
+        # 各自去除静音段,仅在有声样本上对比 RMS
         # 阈值沿用 VAD 检测的 -35dB（≈ 线性幅值 0.0178)
         y_tts_active, y_ref_active = y_tts_trim, y_ref_trim
         _vad_thresh = 10 ** (-35 / 20)  # -35dB → 线性幅值
         for _y, _store in [(y_tts_trim, "tts"), (y_ref_trim, "ref")]:
             _mask = np.abs(_y) > _vad_thresh
             if np.any(_mask):
-                _idx = np.where(_mask)[0]
-                _seg = _y[_idx[0]:_idx[-1] + 1]
+                _seg = _y[_mask]
                 if _store == "tts":
                     y_tts_active = _seg
                 else:
@@ -578,6 +577,7 @@ def match_rms_gain(tts_path: str, ref_vocal_path: str, output_path: str) -> tupl
 
         if abs(gain_db) > 0.3:
             y_out = y_tts * (10 ** (gain_db / 20))
+            y_out = np.clip(y_out, -1.0, 1.0)
             write_wav_np(output_path, y_out, sr_tts)
             return output_path, {"gain_db": float(gain_db), "rms_tts": rms_tts, "rms_ref": rms_ref, "applied": True}
         else:
@@ -748,7 +748,7 @@ def splice_segments_into_base(
             if clip_len > seg_len:
                 y_clip = y_clip[:seg_len]
             elif clip_len < seg_len:
-                pad_shape = (seg_len - clip_len,) + (y_clip.shape[1:] if nch > 1 else ())
+                pad_shape = (seg_len - clip_len,) + (y_clip.shape[1:] if y_clip.ndim > 1 else ())
                 y_clip = np.concatenate([y_clip, np.zeros(pad_shape)])
 
             # 计算安全的淡变长度,避免与相邻片段重叠

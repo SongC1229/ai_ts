@@ -96,6 +96,16 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
                     pass
                 _w.quit()
                 _w.wait(3000)
+        # 等待单条重生成线程和 TTS 扫描线程退出,避免 QThread 销毁时仍运行导致崩溃
+        for _worker_name in ('_regen_thread', '_tts_scanner'):
+            _w = getattr(self, _worker_name, None)
+            if _w is not None and _w.isRunning():
+                try:
+                    _w.requestInterruption()
+                except Exception:
+                    pass
+                _w.quit()
+                _w.wait(3000)
         self.log_file("\n==== GUI Closed ====\n")
         super().closeEvent(event)
     def __init__(self):
