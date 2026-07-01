@@ -1,7 +1,7 @@
 """播放控制 Mixin：音频播放、波形加载、播放器状态管理"""
 import os
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QTimer
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 
 from core.audio_tools import get_audio_info
@@ -310,7 +310,8 @@ class PlaybackMixin:
     def _on_player_position(self, pos_ms: int):
         """播放位置更新,到达终点时自动停止"""
         if self._play_end_ms > 0 and pos_ms >= self._play_end_ms:
-            self._stop_playback()
+            # 推迟到下一事件循环,避免在 positionChanged 回调内同步 stop 导致 MediaFoundation 重入
+            QTimer.singleShot(0, self._stop_playback)
             return
         dur = self.player.duration()
         display_ms = self._display_duration or dur

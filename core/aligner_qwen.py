@@ -98,14 +98,20 @@ def _ensure_server():
         ["uv", "run", "python", "qwen_api_server.py", "--port", port],
     ]
     _SERVER_PROC = None
+    # Windows 下创建进程组,便于 _stop_server 用 taskkill /T 杀整棵子进程树
+    _popen_kwargs = dict(
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONWARNINGS": "ignore", "UVICORN_LOG_LEVEL": "warning"},
+    )
+    if sys.platform == "win32":
+        _popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     for _cmd in _launch_cmds:
         try:
             _SERVER_PROC = subprocess.Popen(
                 _cmd,
                 cwd=api_dir if _cmd[0] == "uv" else None,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env={**os.environ, "PYTHONWARNINGS": "ignore", "UVICORN_LOG_LEVEL": "warning"},
+                **_popen_kwargs,
             )
             if _cmd[0] == "uv":
                 _log("使用 uv run 启动")
@@ -171,7 +177,11 @@ def _stop_server():
     if _SERVER_PROC is not None:
         try:
             if sys.platform == "win32":
-                _SERVER_PROC.terminate()
+                # 用 taskkill /T 杀整棵进程树(含 uvicorn worker 等孙进程)
+                # terminate() 仅杀直接子进程,孙进程会泄漏占显存/端口
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(_SERVER_PROC.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
                 _SERVER_PROC.wait(timeout=5)
             else:
                 _SERVER_PROC.send_signal(signal.SIGTERM)

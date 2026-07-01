@@ -86,6 +86,9 @@ def parse_srt(filepath: str) -> List[SubtitleItem]:
     with open(filepath, 'r', encoding='utf-8-sig') as f:
         content = f.read()
 
+    # 统一换行符,避免 CRLF 文件多行字幕中间行残留 \r
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+
     # 按空行分割成块
     blocks = re.split(r'\n\s*\n', content.strip())
     items = []
