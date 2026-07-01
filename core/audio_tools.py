@@ -239,7 +239,7 @@ def vad_trim_silence(
         "leading_trimmed_ms": 0, "trailing_cut_ms": 0,
     }
     try:
-        if pre_speech_start_ms > 0:
+        if pre_speech_start_ms >= 0:
             # 使用预先提供的语音起始位置,跳过 VAD 检测
             dur_ms = get_audio_info(input_path).duration_ms
             tts_start_ms = pre_speech_start_ms
@@ -278,19 +278,21 @@ def vad_trim_silence(
             "leading_trimmed_ms": trim_ms,
             "trailing_cut_ms": 0,
         })
+
+        # ffmpeg 裁剪（在 try 内,失败时回退到原文件)
+        sr = get_audio_info(input_path).sample_rate
+        cmd = [
+            'ffmpeg', '-y', '-i', input_path,
+            '-af', f'atrim=start={start_sec}',
+            '-acodec', 'pcm_s16le', '-ar', str(sr), '-ac', '1',
+            output_path
+        ]
+        _run_ffmpeg(cmd)
+        return output_path, _info
     except Exception:
         import shutil
         shutil.copy2(input_path, output_path)
         return output_path, _info
-    sr = get_audio_info(input_path).sample_rate
-    cmd = [
-        'ffmpeg', '-y', '-i', input_path,
-        '-af', f'atrim=start={start_sec}',
-        '-acodec', 'pcm_s16le', '-ar', str(sr), '-ac', '1',
-        output_path
-    ]
-    _run_ffmpeg(cmd)
-    return output_path, _info
 
 
 def vad_detect_speech(
@@ -615,6 +617,13 @@ def mix_segment_clip(
         y_tts, sr = read_wav_np(tts_path)           # TTS → mono (1D)
         y_bg, sr_bg = read_wav_np(background_clip_path, mono=False)  # BG → 保留声道
 
+        # 规范化背景声道维度,避免 (N,1) 2D 单声道触发广播错误
+        if y_bg.ndim == 2:
+            if y_bg.shape[1] == 1:
+                y_bg = y_bg[:, 0]  # 2D 单声道 → 1D
+            elif y_bg.shape[1] > 2:
+                y_bg = y_bg[:, :2]  # 多声道下混为立体声(取前两路)
+
         if len(y_tts) == 0 or len(y_bg) == 0:
             fallback_sr = get_audio_info(background_clip_path).sample_rate if os.path.exists(background_clip_path) else get_audio_info(tts_path).sample_rate
             cmd = [
@@ -632,13 +641,19 @@ def mix_segment_clip(
         # 统一采样率（以背景为准,TTS 升采样到背景采样率)
         if sr != sr_bg:
             tmp_resample = output_path + '.resample.tmp.wav'
-            _run_ffmpeg([
-                'ffmpeg', '-y', '-i', tts_path,
-                '-ar', str(sr_bg), '-ac', '1', '-acodec', 'pcm_s16le',
-                tmp_resample
-            ])
-            y_tts, sr = read_wav_np(tmp_resample)
-            os.remove(tmp_resample)
+            try:
+                _run_ffmpeg([
+                    'ffmpeg', '-y', '-i', tts_path,
+                    '-ar', str(sr_bg), '-ac', '1', '-acodec', 'pcm_s16le',
+                    tmp_resample
+                ])
+                y_tts, sr = read_wav_np(tmp_resample)
+            finally:
+                if os.path.exists(tmp_resample):
+                    try:
+                        os.remove(tmp_resample)
+                    except Exception:
+                        pass
 
         # 统一长度：以较长的一方为准
         # （TTS 短 → 尾部补静音,保留完整背景,确保混音片段≥字幕区间时长)
@@ -727,13 +742,19 @@ def splice_segments_into_base(
 
             if sr_clip != sr:
                 tmp = output_path + '.splice_resample.tmp.wav'
-                _run_ffmpeg([
-                    'ffmpeg', '-y', '-i', clip_path,
-                    '-ar', str(sr), '-ac', str(max(1, nch)), '-acodec', 'pcm_s16le',
-                    tmp
-                ])
-                y_clip, _ = read_wav_np(tmp, mono=False)
-                os.remove(tmp)
+                try:
+                    _run_ffmpeg([
+                        'ffmpeg', '-y', '-i', clip_path,
+                        '-ar', str(sr), '-ac', str(max(1, nch)), '-acodec', 'pcm_s16le',
+                        tmp
+                    ])
+                    y_clip, _ = read_wav_np(tmp, mono=False)
+                finally:
+                    if os.path.exists(tmp):
+                        try:
+                            os.remove(tmp)
+                        except Exception:
+                            pass
 
             s = int(start_ms * sr / 1000.0)
             e = int(end_ms * sr / 1000.0)

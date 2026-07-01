@@ -164,7 +164,7 @@ def get_threads(ctx, attr_name: str, max_workers: int = 8) -> int:
         if ctx.log_ui:
             ctx.log_ui(f"  ⚠️ {attr_name} 未配置,回退为 1")
         return 1
-    return min(raw, max_workers)
+    return max(1, min(raw, max_workers))
 
 def calibrate_times(first_ms, last_ms, orig_s, orig_e, win_s, win_e, left_pad=0, right_pad=0, asr_pad_ms=100):
     cs = max(win_s, first_ms - asr_pad_ms)
