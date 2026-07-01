@@ -393,6 +393,18 @@ class SubStep(BaseStep):
         if ctx.on_raw_subs_ready and ctx.raw_subs:
             ctx.on_raw_subs_ready(ctx.raw_subs)
 
+        # 打印 VAD 偏移日志
+        _vad_items = [s for s in subs if s.calib_vad_ms >= 0]
+        if _vad_items:
+            _parts = [f"#{s.idx}={s.calib_vad_ms}" for s in _vad_items]
+            _vad_lines = []
+            for i in range(0, len(_parts), 8):
+                _prefix = "  VAD偏移(ms): " if i == 0 else "               "
+                _vad_lines.append(_prefix + " ".join(_parts[i:i+8]))
+            for _line in _vad_lines:
+                if ctx.log_file:
+                    ctx.log_file(_line)
+
         # 6. 完成
         self.mark_completed(ctx)
         self._progress(ctx, 100)
@@ -502,6 +514,7 @@ class SubStep(BaseStep):
 
             _log_msgs = []  # 收集日志,最后排序打印
             _aligned = set()  # 成功校准的索引集合（reason=="OK"）
+            _qwen_vad_cache = {}  # idx -> VAD起始偏移
             for batch_pos in range(0, len(_sorted_indices), BATCH_SIZE):
                 ctx.check_cancelled()
                 batch_indices = _sorted_indices[batch_pos:batch_pos + BATCH_SIZE]
@@ -551,6 +564,7 @@ class SubStep(BaseStep):
                                     _qvad_hd = (win_s + _qwen_fs) - _final_s
                                     _qvad_td = (win_s + le) - _final_e
                                     corrected_times[_k_idx] = (_final_s, _final_e)
+                                    _qwen_vad_cache[_k_idx] = _qvad_hd
                                     changed_count += (_final_s != orig_s or _final_e != orig_e)
                                     _aligned.add(_k_idx)
                                     reason = "OK"
@@ -634,6 +648,12 @@ class SubStep(BaseStep):
             sub.calib_start_ms = s
             sub.calib_end_ms = e
 
+        # 从 Qwen 词级时间戳提取 VAD 起始偏移 = 第一个词起始 - 校准窗口起始
+        for _sub in dst_subs:
+            _vad = _qwen_vad_cache.get(_sub.idx, -1)
+            if _vad >= 0:
+                _sub.calib_vad_ms = _vad
+
         has_calib_changes = bool(_aligned)
         return has_calib_changes
 
@@ -699,6 +719,23 @@ class SubStep(BaseStep):
             for sub in subs:
                 cs, ce = corrected_times.get(sub.idx - 1, (sub.start_ms, sub.end_ms))
                 sub.calib_start_ms, sub.calib_end_ms = cs, ce
+
+            # 从 Whisper 词级时间戳提取 VAD 起始偏移
+            import bisect as _b
+            _ws_starts = [w["start_ms"] for w in words]
+            for _sub in subs:
+                if _sub.is_calibrated:
+                    i = _sub.idx - 1
+                    win_s, _, _, _ = _send_ranges[i]
+                    _final_s = _sub.calib_start_ms
+                    _lo = _b.bisect_left(_ws_starts, win_s)
+                    _hi = _b.bisect_right(_ws_starts, _sub.calib_end_ms)
+                    _ww = words[_lo:_hi]
+                    if _ww:
+                        _first_ms = _ww[0]["start_ms"]
+                        _vad = _first_ms - _final_s
+                        if _vad >= 0:
+                            _sub.calib_vad_ms = _vad
 
             # 构建 raw_subs
             ctx.raw_subs = []
@@ -1784,7 +1821,8 @@ def mix_tts_segment(
         _, trim_info = vad_trim_silence(
             tts_path_faded, aligned_path,
             ref_audio_path=vocals_ref or vocals_path,
-            pre_speech_start_ms=speech_start)
+            pre_speech_start_ms=speech_start,
+            ref_speech_start_ms=getattr(sub, 'calib_vad_ms', -1))
     except Exception:
         trim_info = {}
         shutil.copy2(tts_path_faded, aligned_path)

@@ -217,6 +217,7 @@ def vad_trim_silence(
     silence_thresh: str = "-45dB",
     ref_audio_path: str = "",
     pre_speech_start_ms: int = 0,
+    ref_speech_start_ms: int = -1,
 ) -> tuple:
     """联合 add_leading_silence 处理前导静音：只裁 TTS 比参考多出的前导静音
 
@@ -224,6 +225,7 @@ def vad_trim_silence(
     - 仅裁剪 TTS 比参考多出的那部分（保留与参考等长的前导静音)
     - 尾部静音不裁剪,完整保留
     - 如果提供 pre_speech_start_ms,跳过 TTS 的 VAD 检测,直接使用该值
+    - 如果提供 ref_speech_start_ms,跳过参考音频的 VAD 检测,直接使用该值
 
     Returns:
         (output_path, info_dict) info_dict 包含:
@@ -252,7 +254,9 @@ def vad_trim_silence(
 
         # 检测参考音频的前导静音长度
         ref_start_ms = 0
-        if ref_audio_path and os.path.exists(ref_audio_path):
+        if ref_speech_start_ms >= 0:
+            ref_start_ms = ref_speech_start_ms
+        elif ref_audio_path and os.path.exists(ref_audio_path):
             try:
                 ref_info = vad_detect_speech(ref_audio_path, silence_thresh)
                 ref_start_ms = ref_info.get("start_ms", 0) if isinstance(ref_info, dict) else 0

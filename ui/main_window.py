@@ -19,7 +19,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from ui.settings_dialog import SettingsDialog
 from ui.table_models import (
     SubtitleTableModel, SrcTableModel, ButtonDelegate, GenderFilterProxy,
-    SUBTITLE_COLUMNS, SRC_COLUMNS, SRC_COL_START, BUTTON_COLUMNS,
+    SUBTITLE_COLUMNS, SRC_COLUMNS, SRC_COL_START, SRC_COL_TEXT, BUTTON_COLUMNS,
     COL_START, COL_GENDER, COL_TEXT, COL_PLAY_TTS, COL_PLAY_MIX, COL_PLAY_RAW_TTS, COL_PLAY_VOCAL, COL_COMPARE, COL_REGEN,
     COL_IDX,
 )
@@ -96,6 +96,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
                     pass
                 _w.quit()
                 _w.wait(3000)
+        self.log_file("\n==== GUI Closed ====\n")
         super().closeEvent(event)
     def __init__(self):
         super().__init__()
@@ -134,6 +135,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self._refresh_speaker_emb_list()
         QTimer.singleShot(100, self._update_cache_status)
         setup_logging(self.log_text, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.log_file("\n==== GUI Started ====")
         QTimer.singleShot(500, self._cleanup_qwen_residual)
         self.move(460, 120)
         default_video = self.video_path_edit.text()
@@ -331,6 +333,18 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             if w > 0:
                 self.src_table.setColumnWidth(ci, w)
         self.src_table.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        from PySide6.QtWidgets import QStyledItemDelegate
+        class _RawTextDelegate(QStyledItemDelegate):
+            def paint(self, painter, option, index):
+                if index.column() == SRC_COL_TEXT:
+                    text = index.data(Qt.DisplayRole) or ""
+                    painter.save()
+                    painter.setClipRect(option.rect)
+                    painter.drawText(option.rect, Qt.AlignLeft | Qt.AlignVCenter, text)
+                    painter.restore()
+                else:
+                    super().paint(painter, option, index)
+        self.src_table.setItemDelegateForColumn(SRC_COL_TEXT, _RawTextDelegate(self.src_table))
         self.src_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.src_table.setAlternatingRowColors(True)
         self.src_table.verticalHeader().hide()

@@ -272,12 +272,14 @@ class CacheManager:
             if c:
                 sub.calib_start_ms = c.get('calib_start_ms', 0)
                 sub.calib_end_ms = c.get('calib_end_ms', 0)
+                sub.calib_vad_ms = c.get('calib_vad_ms', -1)
 
         for sub in (raw_subs or []):
             c = calib_map.get(sub.idx)
             if c:
                 sub.calib_start_ms = c.get('calib_start_ms', 0)
                 sub.calib_end_ms = c.get('calib_end_ms', 0)
+                sub.calib_vad_ms = c.get('calib_vad_ms', -1)
 
         return True
 

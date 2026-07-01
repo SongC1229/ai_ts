@@ -22,6 +22,7 @@ class SubtitleItem:
     - idx, text: 初次加载后不更改
     - start_ms, end_ms: 始终存储原始 SRT 时间戳
     - calib_start_ms, calib_end_ms: 校准时间（0 = 未校准）
+    - calib_vad_ms: 校准窗口内原声 VAD 语音起始偏移（-1 = 未检测）
     - gender: 性别检测结果（空串 = 未检测）
     """
     idx: int              # 1-based 序号
@@ -30,6 +31,7 @@ class SubtitleItem:
     text: str             # 字幕文本
     calib_start_ms: int = 0   # 校准开始时间（0 = 未校准）
     calib_end_ms: int = 0     # 校准结束时间（0 = 未校准）
+    calib_vad_ms: int = -1    # 校准窗口内原声 VAD 语音起始偏移（-1 = 未检测）
     gender: str = ""          # 性别 "male"/"female"/""
 
     @property
@@ -45,11 +47,13 @@ class SubtitleItem:
         return self.calib_end_ms or self.end_ms
 
     def to_cache_dict(self) -> dict:
-        """导出到校准缓存 JSON（只含 idx + 校准时间）"""
+        """导出到校准缓存 JSON（只含 idx + 校准时间 + VAD偏移）"""
         d = {'idx': self.idx}
         if self.is_calibrated:
             d['calib_start_ms'] = self.calib_start_ms
             d['calib_end_ms'] = self.calib_end_ms
+        if self.calib_vad_ms != -1:
+            d['calib_vad_ms'] = self.calib_vad_ms
         return d
 
     @classmethod
@@ -63,6 +67,7 @@ class SubtitleItem:
             gender=d.get('gender', ''),
             calib_start_ms=d.get('calib_start_ms', 0),
             calib_end_ms=d.get('calib_end_ms', 0),
+            calib_vad_ms=d.get('calib_vad_ms', -1),
         )
 
 
