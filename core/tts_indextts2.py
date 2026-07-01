@@ -147,92 +147,95 @@ def unload_tts_engine():
 
 
 def train_speaker_embedding(clip_paths: list, output_path: str,
-                            device: str = "auto", dtype: str = "float16") -> str:
-    """拼接多条参考音频,提取完整说话人特征集
+                            device: str = "auto", dtype: str = "float16",
+                            **kwargs) -> str:
+    """拼接多条参考音频,分组提取并平均说话人特征集
 
-    将多条音频 VAD 修剪后拼接,一次性提取 style + spk_cond_emb + ref_mel,
-    覆盖全部三个说话人特征分支。
-
-    Args:
-        clip_paths: 音频文件路径列表
-        output_path: 输出 .pt 文件路径
-        device: 推理设备
-        dtype: 精度
-
-    Returns:
-        output_path (写入的 .pt 文件路径)
+    拼接后一次性提取 style + spk_cond_emb + ref_mel + prompt_condition,
+    确保所有特征来自同一段语音,维度一致。
     """
-    import soundfile as sf
-    import numpy as np
+    _log = kwargs.get("log_cb") or (lambda msg: print(msg, flush=True))
+    import librosa
     import torchaudio
+    import soundfile as sf
 
     model = _IndexTTSHolder.load(device=device, dtype=dtype)
     if not clip_paths:
         raise ValueError("clip_paths 为空")
 
-    # 1. 拼接所有音频片段
-    all_audio = []
-    sr = 24000
+    MAX_CLIPS_PER_GROUP = 10
+    MAX_SEC = 20
+    SR = 24000
+
+    # 分组: 每组最多10条,不超过20s
+    groups = []
+    cur_group = []
+    cur_samples = 0
+
     for path in clip_paths:
         if not os.path.exists(path):
             print(f"  [tts] 跳过不存在的音频: {path}")
             continue
         data, file_sr = sf.read(path)
-        if file_sr != sr:
-            import librosa
-            data = librosa.resample(data, orig_sr=file_sr, target_sr=sr)
-        all_audio.append(data)
-    if not all_audio:
+        if file_sr != SR:
+            data = librosa.resample(data, orig_sr=file_sr, target_sr=SR)
+
+        if cur_samples + len(data) > MAX_SEC * SR or len(cur_group) >= MAX_CLIPS_PER_GROUP:
+            if cur_group:
+                groups.append(cur_group)
+            cur_group = [data]
+            cur_samples = len(data)
+        else:
+            cur_group.append(data)
+            cur_samples += len(data)
+    if cur_group:
+        groups.append(cur_group)
+
+    if not groups:
         raise RuntimeError("没有有效的音频文件用于训练")
-    combined = np.concatenate(all_audio)
-    audio_t = torch.from_numpy(combined).float().unsqueeze(0)  # [1, T]
 
-    # 2. 提取所有特征（audio 保持在 CPU,按需移入 GPU)
-    audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio_t)
-    audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio_t)
+    import numpy as np
+    results = []
 
-    # 语义特征
-    inputs = model.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
-    input_features = inputs["input_features"].to(model.device)
-    attention_mask = inputs["attention_mask"].to(model.device)
-    spk_cond_emb = model.get_emb(input_features, attention_mask)
+    for g_idx, group in enumerate(groups):
+        combined = np.concatenate(group)
+        _log(f"  [tts]  组{g_idx+1}: {len(group)} 条, {len(combined)/SR:.1f}s")
+        audio_t = torch.from_numpy(combined).float().unsqueeze(0)
 
-    # 语义编解码 + prompt condition
-    _, S_ref = model.semantic_codec.quantize(spk_cond_emb)
-    ref_mel = model.mel_fn(audio_22k.to(spk_cond_emb.device).float())
-    ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
-    prompt_condition = model.s2mel.models['length_regulator'](
-        S_ref, ylens=ref_target_lengths, n_quantizers=3, f0=None)[0]
+        audio_16k = torchaudio.transforms.Resample(SR, 16000)(audio_t)
+        audio_22k = torchaudio.transforms.Resample(SR, 22050)(audio_t)
 
-    # style 嵌入
-    feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(spk_cond_emb.device),
-                                             num_mel_bins=80, dither=0,
-                                             sample_frequency=16000)
-    feat = feat - feat.mean(dim=0, keepdim=True)
-    style = model.campplus_model(feat.unsqueeze(0))
+        inputs = model.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
+        input_features = inputs["input_features"].to(model.device)
+        attention_mask = inputs["attention_mask"].to(model.device)
+        spk_cond = model.get_emb(input_features, attention_mask)
 
-    # mel 频谱
-    ref_mel = model.mel_fn(audio_22k.float())
+        _, S_ref = model.semantic_codec.quantize(spk_cond)
+        ref_m = model.mel_fn(audio_22k.to(model.device).float())
+        tgt_len = torch.LongTensor([ref_m.size(2)]).to(ref_m.device)
+        prompt = model.s2mel.models["length_regulator"](
+            S_ref, ylens=tgt_len, n_quantizers=3, f0=None)[0]
 
-    torch.save({
-        "speaker_embedding": style.detach().cpu(),  # [1,192]
-        "spk_cond_emb": spk_cond_emb.detach().cpu(),
-        "ref_mel": ref_mel.detach().cpu(),
-        "prompt_condition": prompt_condition.detach().cpu(),
-    }, output_path)
-    print(f"  [tts] 说话人特征集已保存 ({len(clip_paths)} 条音频拼接): {output_path}")
+        feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(model.device),
+                                                 num_mel_bins=80, dither=0,
+                                                 sample_frequency=16000)
+        feat = feat - feat.mean(dim=0, keepdim=True)
+        style = model.campplus_model(feat.unsqueeze(0))
+
+        results.append({
+            "speaker_embedding": style.detach().cpu(),
+            "spk_cond_emb": spk_cond.detach().cpu(),
+            "ref_mel": ref_m.detach().cpu(),
+            "prompt_condition": prompt.detach().cpu(),
+        })
+
+    out = {"speaker_embedding": torch.stack([r["speaker_embedding"] for r in results]).mean(dim=0)}
+    for key in ("spk_cond_emb", "ref_mel", "prompt_condition"):
+        out[key] = results[0][key]
+
+    torch.save(out, output_path)
+    _log(f"  [tts] 说话人特征集已保存 ({len(groups)} 组, {sum(len(g) for g in groups)} 条): {output_path}")
     return output_path
-
-
-# ── 工具函数 ──
-
-def _wav_bytes_to_tempfile(wav_bytes: bytes, suffix=".wav", work_dir: str = "") -> str:
-    """将内存 WAV bytes 写入临时文件,返回路径"""
-    os.makedirs(work_dir, exist_ok=True)
-    path = os.path.join(work_dir, f"ref_{uuid.uuid4().hex}{suffix}")
-    with open(path, "wb") as f:
-        f.write(wav_bytes)
-    return path
 
 
 def _adjust_duration(
@@ -305,7 +308,7 @@ def tts_synthesize(
     # 情绪控制参数
     emo_audio_path: Optional[str] = None,
     emo_audio: Optional[bytes] = None,
-    emo_alpha: float = 1.0,
+    emo_alpha: float = 0.3,
     emo_vector: Optional[list] = None,
     use_emo_text: bool = False,
     emo_text: Optional[str] = None,

@@ -110,7 +110,6 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         super().closeEvent(event)
     def __init__(self):
         super().__init__()
-        self._log_signal.connect(self.log)
         self._wave_done_signal.connect(self._on_wave_done, Qt.ConnectionType.QueuedConnection)
         self.setWindowTitle("电影 AI 配音工具")
         self.setMinimumSize(1430, 900)
@@ -145,6 +144,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self._refresh_speaker_emb_list()
         QTimer.singleShot(100, self._update_cache_status)
         setup_logging(self.log_text, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self._log_signal.connect(self.log)
         self.log_file("\n==== GUI Started ====")
         QTimer.singleShot(500, self._cleanup_qwen_residual)
         self.move(460, 120)
@@ -971,55 +971,64 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
             for sub in subs:
                 out = os.path.join(tmp_dir, f"clip_{sub.idx:04d}.wav")
                 futs[ex.submit(split_audio_np, voc, sub.eff_start_ms, sub.eff_end_ms, out)] = sub.idx
-            _done = 0
             for f in as_completed(futs):
-                _done += 1
                 try:
                     f.result()
                     clip_paths.append(os.path.join(tmp_dir, f"clip_{futs[f]:04d}.wav"))
                 except:
                     pass
-                if _done % 10 == 0:
-                    self.log(f"  提取音频: {_done}/{len(subs)}")
         self.log(f"  音频提取完成: {len(clip_paths)}/{len(subs)} 条, 耗时 {time.time()-t0:.1f}s")
         if not clip_paths:
             QMessageBox.warning(self, "训练音色", "音频提取失败")
             shutil.rmtree(tmp_dir, ignore_errors=True)
             return
-        try:
-            # 根据当前引擎选择训练模块和后缀
-            _engine = self.cfg.tts_local_mode  # "indextts" | "dots"
-            if _engine == "dots":
-                from core.tts_dots import train_speaker_embedding
-                _suffix = ".dots.pt"
-            else:
-                from core.tts_indextts2 import train_speaker_embedding
-                _suffix = ".index.pt"
-            name, ok = QInputDialog.getText(self, "训练音色", "音色名称：", text="")
-            if not ok or not name.strip():
-                self.lbl_cache_status.setText("训练已取消")
-                return
-            name = name.strip() + _suffix
-            out_path = os.path.join(os.getcwd(), "role", name)
-            self.log(f"  训练说话人嵌入 ({len(clip_paths)} 条音频, 引擎={_engine})...")
-            self.lbl_cache_status.setText("正在训练音色...")
-            QApplication.processEvents()
-            train_speaker_embedding(clip_paths, out_path)
-            # 刷新音色下拉
-            for _c in (self.speaker_emb_male, self.speaker_emb_female):
-                _c._refresh_items()
-            for _c in (self.speaker_emb_male, self.speaker_emb_female):
-                for i in range(_c.count()):
-                    if _c.itemText(i) == name:
-                        _c.setCurrentIndex(i)
-                        break
-            self.log(f"  音色已保存: {name}")
-            self.lbl_cache_status.setText(f"音色已训练: {name} ({len(clip_paths)} 条)")
-        except Exception as e:
-            self.log(f"  训练失败: {e}")
-            QMessageBox.critical(self, "训练音色", f"训练失败: {e}")
-        finally:
+        # 根据当前引擎选择训练模块和后缀
+        _engine = self.cfg.tts_local_mode  # "indextts" | "dots"
+        if _engine == "dots":
+            from core.tts_dots import train_speaker_embedding
+            _suffix = ".dots.pt"
+        else:
+            from core.tts_indextts2 import train_speaker_embedding
+            _suffix = ".index.pt"
+        name, ok = QInputDialog.getText(self, "训练音色", "音色名称：", text="")
+        if not ok or not name.strip():
+            self.lbl_cache_status.setText("训练已取消")
             shutil.rmtree(tmp_dir, ignore_errors=True)
+            return
+        name = name.strip() + _suffix
+        out_path = os.path.join(os.getcwd(), "role", name)
+
+        # 后台线程训练,不阻塞 UI
+        from ui.pipeline_worker import TaskThread
+        self.lbl_cache_status.setText("正在训练音色...")
+        self.log(f"  训练说话人嵌入 ({len(clip_paths)} 条音频, 引擎={_engine})...")
+        self._train_thread = TaskThread(
+            target=train_speaker_embedding,
+            args=[clip_paths, out_path],
+            log_cb=self.log,
+        )
+
+        def _on_train_done(result):
+            status = result[0] if result else "error"
+            if status == "ok":
+                for _c in (self.speaker_emb_male, self.speaker_emb_female):
+                    _c._refresh_items()
+                for _c in (self.speaker_emb_male, self.speaker_emb_female):
+                    for i in range(_c.count()):
+                        if _c.itemText(i) == name:
+                            _c.setCurrentIndex(i)
+                            break
+                self.log(f"  音色已保存: {name}")
+                self.lbl_cache_status.setText(f"音色已训练: {name}")
+            else:
+                err = result[1] if len(result) > 1 else "未知错误"
+                self.log(f"  训练失败: {err}")
+                self.lbl_cache_status.setText("训练失败")
+                QMessageBox.critical(self, "训练音色", f"训练失败: {err}")
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        self._train_thread.done.connect(_on_train_done)
+        self._train_thread.start()
     def _on_local_tts_toggled(self, checked: bool):
         """本地引擎开关切换：禁用/启用 API 地址输入"""
         self.api_url_edit.setEnabled(not checked)
