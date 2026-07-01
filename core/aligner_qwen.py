@@ -33,7 +33,6 @@ def set_prefer_uv():
     from .utils import resolve_device
     _dev = resolve_device("auto")
     _use_uv_first = (_dev == "cuda")
-    _log(f"Qwen 启动方式: {'uv run' if _use_uv_first else 'sys.python'} (设备={_dev})")
 
 
 def set_log_cb(cb):
@@ -86,7 +85,7 @@ def _ensure_server():
         return False
 
     port = _API_BASE_URL.split(":")[-1] if ":" in _API_BASE_URL else "8765"
-    _log(f"启动 API 服务 (port={port}) ...")
+    _start_t = time.time()
 
     # 根据 TTS 模式选择启动顺序
     # CUDA 用 uv run 启动，CPU 用 sys.executable
@@ -113,8 +112,6 @@ def _ensure_server():
                 cwd=api_dir if _cmd[0] == "uv" else None,
                 **_popen_kwargs,
             )
-            if _cmd[0] == "uv":
-                _log("使用 uv run 启动")
             break
         except FileNotFoundError:
             continue
@@ -158,8 +155,10 @@ def _ensure_server():
         try:
             r = requests.get(urljoin(_API_BASE_URL, "/health"), timeout=2)
             if r.status_code == 200:
-                _log(f"API 服务就绪 ({i+1}s)")
                 _SERVER_STARTED = True
+                _elapsed = time.time() - _start_t
+                _mode = "uv run" if _use_uv_first else "sys.python"
+                _log(f"qwen {_mode} port={port} ; api 就绪 ({_elapsed:.0f}s)")
                 return True
         except Exception:
             pass

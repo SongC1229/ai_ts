@@ -41,9 +41,9 @@ from .cache_manager import CacheManager
 from config import cfg
 from .audio_tools import (
     split_audio_np,
-    vad_trim_silence, vad_detect_speech,
+    vad_detect_speech, align_tts_leading_silence,
     match_rms_gain, mix_segment_clip,
-    add_leading_silence, pad_audio_np,
+    pad_audio_np,
     get_audio_info,
     splice_segments_into_base,
     is_low_energy,
@@ -396,7 +396,7 @@ class SubStep(BaseStep):
         # 打印 VAD 偏移日志
         _vad_items = [s for s in subs if s.calib_vad_ms >= 0]
         if _vad_items:
-            _parts = [f"#{s.idx}={s.calib_vad_ms}" for s in _vad_items]
+            _parts = [f"#{s.idx:>4d}={s.calib_vad_ms:>4d}" for s in _vad_items]
             _vad_lines = []
             for i in range(0, len(_parts), 8):
                 _prefix = "  VAD偏移(ms): " if i == 0 else "               "
@@ -1106,7 +1106,7 @@ class TTSSynthesisStep(BaseStep):
                     continue
                 txt = sub.text.strip()
                 if (txt.startswith('(') and txt.endswith(')')) or \
-                   (txt.startswith('（') and txt.endswith(')')):
+                   (txt.startswith('（') and txt.endswith('）')):
                     if on_item:
                         on_item(sub.idx, "")
                     continue
@@ -1616,7 +1616,7 @@ def synthesize_tts_segment(
 
     txt = text.replace('\n', ' ').strip()
     if (txt.startswith('(') and txt.endswith(')')) or \
-       (txt.startswith('（') and txt.endswith(')')):
+       (txt.startswith('（') and txt.endswith('）')):
         return None  # 背景解说跳过（pipeline 在此处不输出日志)
 
     _log(f"  TTS {idx} 开始: (API:{tts_cfg.api_url.split(':')[-1]})")
@@ -1734,6 +1734,7 @@ def mix_tts_segment(
     vad_mode: str = "原声对齐", vad_pad_ms: int = 50,
     edge_ms: int = 100, fade: bool = True,
     log_cb=None, file_log_cb=None,
+    tts_vad: dict = None,  # 来自 tts_calib.json 的缓存 VAD,None 则自动检测
 ) -> tuple:
     """对单条 TTS 进行 VAD 修剪 + 前导对齐 + 增益匹配 + 背景混音"""
     idx = sub.idx
@@ -1752,8 +1753,10 @@ def mix_tts_segment(
     if fade:
         try:
             tts_dur = get_audio_info(tts_path).duration_ms
-            tts_vad = vad_detect_speech(tts_path)
-            speech_start = tts_vad.get('start_ms', 0) if isinstance(tts_vad, dict) else 0
+            if tts_vad:
+                speech_start = tts_vad.get('start_ms', 0)
+            else:
+                speech_start = 0  # 无 VAD 时不进行淡入
             if speech_start > 10 and tts_dur > 50:
                 y_data, sr_f = _sf.read(tts_path)
                 fl_in = min(int(0.040 * sr_f), len(y_data) - int(speech_start * sr_f / 1000))
@@ -1774,36 +1777,31 @@ def mix_tts_segment(
         except Exception:
             pass
 
-    # 裁剪原声参考片段（供 VAD 修剪和前导对齐使用)
+    # 裁剪原声参考片段（供增益匹配使用)
     vocals_ref = os.path.join(work_dir, f"_vocals_{idx:04d}.wav")
     try:
         split_audio_np(vocals_path, start_ms, end_ms, vocals_ref)
     except Exception:
-        vocals_ref = ""
+        vocals_ref = vocals_path
 
-    # VAD 修剪
+    # 前导静音对齐(用 Qwen VAD 差值直接补白/裁剪)
     aligned_path = os.path.join(work_dir, f"aligned_{idx:04d}.wav")
     try:
-        _, trim_info = vad_trim_silence(
+        _ref_vad = getattr(sub, 'calib_vad_ms', -1)
+        _, _trim_info = align_tts_leading_silence(
             tts_path_faded, aligned_path,
-            ref_audio_path=vocals_ref or vocals_path,
-            pre_speech_start_ms=speech_start,
-            ref_speech_start_ms=getattr(sub, 'calib_vad_ms', -1))
+            vad_offset_ms=speech_start,
+            ref_vad_offset_ms=_ref_vad)
+        _adj = _trim_info if isinstance(_trim_info, int) else 0
+        trim_info = {
+            "speech_start_ms": max(0, speech_start - _ref_vad) if _ref_vad >= 0 else speech_start,
+            "leading_trimmed_ms": max(0, _ref_vad - speech_start) if _ref_vad >= 0 else 0,
+            "duration_ms": get_audio_info(aligned_path).duration_ms,
+            "vad_adjust_ms": _adj,
+        }
     except Exception:
         trim_info = {}
         shutil.copy2(tts_path_faded, aligned_path)
-
-    # 前导静音对齐
-    tmp_sil = aligned_path + ".sil_tmp"
-    try:
-        if vocals_ref:
-            _, _ = add_leading_silence(
-                aligned_path, tmp_sil,
-                ref_audio_path=vocals_ref,
-                mode=vad_mode, margin_ms=vad_pad_ms)
-            os.replace(tmp_sil, aligned_path)
-    except Exception:
-        pass
 
     # RMS 增益匹配
     gain_path = os.path.join(work_dir, f"gain_{idx:04d}.wav")
@@ -1889,8 +1887,79 @@ class AudioMixAndMergeStep(BaseStep):
         # 构建 sub_map 一次,避免 _safe_edge 每次重建
         _sub_map = {s.idx: s for s in ctx.subs}
 
+        # ── 加载/生成 TTS VAD 缓存 (tts_calib.json) ──
+        _tts_vad_cache = {}  # idx -> vad dict
+        _calib_path = os.path.join(ctx.cache.cache_dir, "tts", "tts_calib.json")
+        _old_calib = {}
+        if os.path.exists(_calib_path):
+            try:
+                with open(_calib_path, encoding='utf-8') as _f:
+                    _old_calib = json.load(_f)
+                ctx.log_ui(f"  从缓存加载 TTS VAD: {len(_old_calib)} 条")
+            except Exception:
+                pass
+        _new_calib = {}
+        # 先收集需要检测的条目,尝试用 Qwen 批量对齐
+        _need_vad_subs = []  # (idx, tts_path, text)
+        for _sub in ctx.subs:
+            _idx = _sub.idx
+            _tp = ctx.cache.tts_path(_sub)
+            _cached = _old_calib.get(str(_idx), {})
+            if _cached and _cached.get('start_ms', -1) >= 0 and os.path.exists(_tp):
+                _st = os.stat(_tp)
+                if _cached.get('mtime') == _st.st_mtime and _cached.get('size') == _st.st_size:
+                    _tts_vad_cache[_idx] = _cached
+                    _new_calib[str(_idx)] = _cached
+                    continue
+            if os.path.exists(_tp):
+                _need_vad_subs.append((_idx, _tp, _sub.text))
+
+        # Qwen 批量对齐 TTS 音频 + 文本（先释放 TTS 引擎显存)
+        if _need_vad_subs:
+            cleanup_cuda()
+            try:
+                from .tts_indextts2 import unload_tts_engine
+                unload_tts_engine()
+            except Exception:
+                pass
+            cleanup_cuda()
+            try:
+                from .aligner_qwen import align_batch as _qwen_batch, set_prefer_uv as _qwen_set_uv
+                _qwen_set_uv()
+                _qwen_items = [(p, t.replace('\n', ' ').strip()) for _, p, t in _need_vad_subs]
+                _qwen_results = _qwen_batch(_qwen_items, language="ja")
+                for (_idx, _tp, _), _words in zip(_need_vad_subs, _qwen_results):
+                    if _words:
+                        _start = int(_words[0]["start_ms"])
+                        _end = int(_words[-1]["end_ms"])
+                        _entry = {"start_ms": _start, "end_ms": _end, "mtime": os.stat(_tp).st_mtime,
+                                  "size": os.path.getsize(_tp)}
+                        _tts_vad_cache[_idx] = _entry
+                        _new_calib[str(_idx)] = _entry
+            except Exception as _qe:
+                raise RuntimeError(f"Qwen TTS 对齐失败: {_qe}")
+        try:
+            os.makedirs(os.path.dirname(_calib_path), exist_ok=True)
+            with open(_calib_path, 'w', encoding='utf-8') as _f:
+                json.dump(_new_calib, _f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        # 打印 TTS VAD 偏移日志（与校准阶段格式一致)
+        if _tts_vad_cache:
+            _parts = [f"#{idx:>4d}={v['start_ms']:>4d}" for idx, v in sorted(_tts_vad_cache.items())]
+            if _parts:
+                _vad_lines = []
+                for i in range(0, len(_parts), 8):
+                    _prefix = "  TTS VAD偏移(ms): " if i == 0 else "                   "
+                    _vad_lines.append(_prefix + " ".join(_parts[i:i+8]))
+                for _line in _vad_lines:
+                    if ctx.log_file:
+                        ctx.log_file(_line)
+
         # TTS + mix 日志缓冲区（并行线程导致输出乱序,统一收集后排序)
         _mix_log_buffer = []
+        _adjustments = {}  # idx -> vad_adjust_ms
 
         def _process_one(sub):
             """处理单条字幕（供线程池调用)"""
@@ -1901,6 +1970,22 @@ class AudioMixAndMergeStep(BaseStep):
             # 检查单条混合缓存
             mixed_clip = ctx.cache.mixed_path(sub)
             if os.path.exists(mixed_clip):
+                # 缓存命中,输出 raw + tts 行
+                _cached_vad = _tts_vad_cache.get(idx, {})
+                _cached_tail = f"时长{(end_ms - start_ms)/1000:.3f}s (缓存)"
+                _cached_p1 = f"{idx:>3d} raw: 字幕开始= {fmt_time(start_ms)}"
+                _cached_p2 = f"字幕结束= {fmt_time(end_ms)}"
+                _mix_log_buffer.append((idx, 1, f"{_cached_p1:<42s}{_cached_p2:<28s}  {_cached_tail}"))
+                if _cached_vad.get('start_ms', -1) >= 0:
+                    _speech = _cached_vad['start_ms']
+                    _vad_end = _cached_vad.get('end_ms', _speech)
+                    _fade_in = start_ms + _speech
+                    _fade_out = start_ms + _vad_end
+                    _off = _fade_out - end_ms
+                    _tts_tail = f"时长{(_vad_end - _speech)/1000:.3f}s"
+                    _tts_p1 = f"    tts: 淡入开始= {fmt_time(_fade_in)}({_speech:+5d}ms)"
+                    _tts_p2 = f"淡出结束= {fmt_time(_fade_out)}({_off:+5d}ms)"
+                    _mix_log_buffer.append((idx, 2, f"{_tts_p1:<42s}{_tts_p2:<28s}  {_tts_tail}"))
                 return None
 
             # 查找原始 TTS 文件
@@ -1923,6 +2008,7 @@ class AudioMixAndMergeStep(BaseStep):
                 edge_ms=_edge_ms, fade=True,
                 log_cb=ctx.log_ui,
                 file_log_cb=None,
+                tts_vad=_tts_vad_cache.get(idx),
             )
             # 注：展开区间由 _build_tts_segments 重建,mix 行在拼接后统一输出
             return idx, start_ms, end_ms, _tts_dur, _edge_ms, trim_info, vocals_ref, aligned_path, gain_path, _padded_tts
@@ -1968,6 +2054,11 @@ class AudioMixAndMergeStep(BaseStep):
                         # 实际计算（被 seg_len//4 与相邻片段间距夹断),此处无法预知。
                     except Exception:
                         pass
+                    # 前导调整(补白/裁剪)
+                    _adj = int(trim_info.get('vad_adjust_ms', 0)) if trim_info else 0
+                    if _adj:
+                        _adjustments[idx] = _adj
+                    _batch_ids.append(idx)
                     # 清理临时文件
                     for tmp in [aligned_path, gain_path, _padded_tts, vocals_ref]:
                         if os.path.exists(tmp):
@@ -1975,7 +2066,6 @@ class AudioMixAndMergeStep(BaseStep):
                                 os.remove(tmp)
                             except Exception:
                                 pass
-                    _batch_ids.append(idx)
                     if on_mix_item and len(_batch_ids) >= 5:
                         on_mix_item(_batch_ids)
                         _batch_ids = []
@@ -1983,6 +2073,17 @@ class AudioMixAndMergeStep(BaseStep):
 
         if on_mix_item and _batch_ids:
             on_mix_item(_batch_ids)
+
+        # 批量打印前导调整日志（与 VAD 偏移格式一致）
+        if _adjustments:
+            _parts = [f"#{idx:>4d}={adj:+5d}" for idx, adj in sorted(_adjustments.items())]
+            _adj_lines = []
+            for i in range(0, len(_parts), 8):
+                _prefix = "  TTS 前导处理(ms): " if i == 0 else "                    "
+                _adj_lines.append(_prefix + " ".join(_parts[i:i+8]))
+            for _line in _adj_lines:
+                if ctx.log_file:
+                    ctx.log_file(_line)
 
         ctx.log_ui(f"===== 分段混音阶段完成 ({_mix_timer.time()-_mix_t0:.1f}s) =====")
         _build_tts_segments(ctx)
@@ -2268,6 +2369,15 @@ def regen_single_tts(
     start_ms = sub.eff_start_ms
     end_ms = sub.eff_end_ms
     _log = make_logger(log_cb)
+
+    # 跳过背景解说（与 synthesize_tts_segment 一致)
+    txt = text.replace('\n', ' ').strip()
+    if (txt.startswith('(') and txt.endswith(')')) or \
+       (txt.startswith('（') and txt.endswith('）')):
+        _log(f"  ⏭️ 第{idx:4d}条: 背景解说,跳过")
+        if done_cb:
+            done_cb(True, "")
+        return
 
     try:
         os.makedirs(work_dir, exist_ok=True)

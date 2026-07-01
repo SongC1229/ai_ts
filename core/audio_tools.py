@@ -211,90 +211,6 @@ def pad_audio_np(input_path: str, output_path: str, front_ms: int = 0, back_ms: 
 
 
 
-def vad_trim_silence(
-    input_path: str,
-    output_path: str,
-    silence_thresh: str = "-45dB",
-    ref_audio_path: str = "",
-    pre_speech_start_ms: int = 0,
-    ref_speech_start_ms: int = -1,
-) -> tuple:
-    """联合 add_leading_silence 处理前导静音：只裁 TTS 比参考多出的前导静音
-
-    - 检测 TTS 和参考音频的前导静音长度
-    - 仅裁剪 TTS 比参考多出的那部分（保留与参考等长的前导静音)
-    - 尾部静音不裁剪,完整保留
-    - 如果提供 pre_speech_start_ms,跳过 TTS 的 VAD 检测,直接使用该值
-    - 如果提供 ref_speech_start_ms,跳过参考音频的 VAD 检测,直接使用该值
-
-    Returns:
-        (output_path, info_dict) info_dict 包含:
-            orig_duration_ms, speech_start_ms, speech_end_ms,
-            trim_start_ms, trim_end_ms,
-            leading_trimmed_ms, trailing_cut_ms (=0 不截尾)
-    """
-    _info = {
-        "orig_duration_ms": 0, "speech_start_ms": 0, "speech_end_ms": 0,
-        "trim_start_ms": 0, "trim_end_ms": 0,
-        "leading_trimmed_ms": 0, "trailing_cut_ms": 0,
-    }
-    try:
-        if pre_speech_start_ms >= 0:
-            # 使用预先提供的语音起始位置,跳过 VAD 检测
-            dur_ms = get_audio_info(input_path).duration_ms
-            tts_start_ms = pre_speech_start_ms
-        else:
-            info = vad_detect_speech(input_path, silence_thresh)
-            if not isinstance(info, dict) or info.get("speech_ms", 0) < 50:
-                import shutil
-                shutil.copy2(input_path, output_path)
-                return output_path, _info
-            dur_ms = info.get("duration_ms", 0)
-            tts_start_ms = info.get("start_ms", 0)
-
-        # 检测参考音频的前导静音长度
-        ref_start_ms = 0
-        if ref_speech_start_ms >= 0:
-            ref_start_ms = ref_speech_start_ms
-        elif ref_audio_path and os.path.exists(ref_audio_path):
-            try:
-                ref_info = vad_detect_speech(ref_audio_path, silence_thresh)
-                ref_start_ms = ref_info.get("start_ms", 0) if isinstance(ref_info, dict) else 0
-            except Exception:
-                pass
-
-        # 只裁 TTS 比参考多出的前导静音
-        trim_ms = max(0, tts_start_ms - ref_start_ms)
-        start_sec = trim_ms / 1000.0
-
-        # speech_end_ms / trim_end_ms: 不截尾,语音尾部延伸到音频末尾
-        _speech_end = dur_ms
-        _info.update({
-            "orig_duration_ms": dur_ms,
-            "speech_start_ms": tts_start_ms,
-            "speech_end_ms": _speech_end,
-            "trim_start_ms": trim_ms,
-            "trim_end_ms": _speech_end,
-            "leading_trimmed_ms": trim_ms,
-            "trailing_cut_ms": 0,
-        })
-
-        # ffmpeg 裁剪（在 try 内,失败时回退到原文件)
-        sr = get_audio_info(input_path).sample_rate
-        cmd = [
-            'ffmpeg', '-y', '-i', input_path,
-            '-af', f'atrim=start={start_sec}',
-            '-acodec', 'pcm_s16le', '-ar', str(sr), '-ac', '1',
-            output_path
-        ]
-        _run_ffmpeg(cmd)
-        return output_path, _info
-    except Exception:
-        import shutil
-        shutil.copy2(input_path, output_path)
-        return output_path, _info
-
-
 def vad_detect_speech(
     input_path: str,
     silence_thresh: str = "-45dB"
@@ -439,89 +355,6 @@ def _vad_numpy(wav_path: str, lin_thresh: float, duration_ms: int) -> list:
         return [(0, duration_ms / 1000.0)] if duration_ms > 0 else []
 
     return speech_segs
-
-
-def add_leading_silence(
-    input_path: str,
-    output_path: str,
-    ref_audio_path: str = "",
-    mode: str = "原声对齐",
-    margin_ms: int = 50,
-) -> tuple[str, int]:
-    """在 TTS 音频前添加前导静音,对齐原声起始偏移
-
-    Args:
-        input_path: VAD 修剪后的 TTS 音频
-        output_path: 输出路径
-        ref_audio_path: 原始人声参考音频（vocals_clip),用于检测原声起始
-        mode: "原声对齐" — 参考原声前导静音长度补足
-              "字幕对齐" — 固定补充 margin_ms 的前导静音
-        margin_ms: 字幕对齐模式下的固定留白毫秒数
-
-    Returns:
-        (output_path, pad_ms) — pad_ms 为实际补充的静音毫秒数
-    """
-    import shutil
-    if mode == "字幕对齐":
-        # 固定补充 margin_ms 前导静音
-        if margin_ms <= 0:
-            shutil.copy2(input_path, output_path)
-            return output_path, 0
-        sr = get_audio_info(input_path).sample_rate
-        silence_samples = int(sr * margin_ms / 1000)
-        import wave as _w
-        with _w.open(input_path, 'rb') as wf:
-            params = wf.getparams()
-            frames = wf.readframes(wf.getnframes())
-        frame_bytes = params.sampwidth * params.nchannels
-        silence = b'\x00' * (silence_samples * frame_bytes)
-        with _w.open(output_path, 'wb') as wf:
-            wf.setparams(params)
-            wf.writeframes(silence + frames)
-        return output_path, margin_ms
-
-    # 原声对齐：检测原始音频前导静音长度,补足到相同
-    if not ref_audio_path or not os.path.exists(ref_audio_path):
-        shutil.copy2(input_path, output_path)
-        return output_path, 0
-
-    ref_info = vad_detect_speech(ref_audio_path)
-    tts_info = vad_detect_speech(input_path)
-    if not ref_info or ref_info.get("speech_ms", 0) < 50:
-        shutil.copy2(input_path, output_path)
-        return output_path, 0
-    if not tts_info or tts_info.get("speech_ms", 0) < 50:
-        shutil.copy2(input_path, output_path)
-        return output_path, 0
-
-    # 原声前导静音长度 = 语音起始位置
-    ref_start_ms = ref_info.get("start_ms", 0)
-    tts_start_ms = tts_info.get("start_ms", 0)
-    pad_needed_ms = ref_start_ms - tts_start_ms
-
-    sr = get_audio_info(input_path).sample_rate
-    import wave as _w
-    with _w.open(input_path, 'rb') as wf:
-        params = wf.getparams()
-        frames = wf.readframes(wf.getnframes())
-    frame_bytes = params.sampwidth * params.nchannels
-
-    if pad_needed_ms > 0:
-        # TTS 起始早于原声 → 在前部补充静音
-        silence_samples = int(sr * pad_needed_ms / 1000)
-        silence = b'\x00' * (silence_samples * frame_bytes)
-        with _w.open(output_path, 'wb') as wf:
-            wf.setparams(params)
-            wf.writeframes(silence + frames)
-        return output_path, pad_needed_ms
-    else:
-        # 无需处理（vad_trim_silence 已保证 TTS 前导不超出原始)
-        import shutil
-        shutil.copy2(input_path, output_path)
-        return output_path, 0
-
-
-# ── 新流程: 片段级混音与拼接 ──────────────────────────────────
 
 
 def match_rms_gain(tts_path: str, ref_vocal_path: str, output_path: str) -> tuple:
@@ -899,3 +732,35 @@ def get_rms_db(audio_path: str) -> float:
         return float(20 * _np.log10(rms))
     except Exception:
         return float('-inf')
+
+def align_tts_leading_silence(tts_path, output_path, vad_offset_ms, ref_vad_offset_ms):
+    import shutil, wave
+    if ref_vad_offset_ms < 0 or vad_offset_ms < 0:
+        shutil.copy2(tts_path, output_path)
+        return output_path, 0
+    diff = ref_vad_offset_ms - vad_offset_ms
+    sr = get_audio_info(tts_path).sample_rate
+    with wave.open(tts_path, 'rb') as wf:
+        params = wf.getparams()
+        frames = wf.readframes(wf.getnframes())
+    frame_bytes = params.sampwidth * params.nchannels
+    if diff > 0:
+        silence_samples = int(sr * diff / 1000)
+        import numpy as np
+        silence = np.zeros(silence_samples, dtype=np.int16).tobytes()
+        with wave.open(output_path, 'wb') as wf:
+            wf.setparams(params)
+            wf.writeframes(silence + frames)
+        return output_path, diff
+    elif diff < 0:
+        trim_samples = int(sr * (-diff) / 1000)
+        if trim_samples >= len(frames) // frame_bytes:
+            shutil.copy2(tts_path, output_path)
+            return output_path, 0
+        with wave.open(output_path, 'wb') as wf:
+            wf.setparams(params)
+            wf.writeframes(frames[trim_samples * frame_bytes:])
+        return output_path, diff
+    else:
+        shutil.copy2(tts_path, output_path)
+        return output_path, 0

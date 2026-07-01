@@ -468,27 +468,6 @@ def tts_synthesize(
         with open(out_path, "rb") as f:
             wav_data = f.read()
 
-        # 裁剪前导静音,保留约 150ms（混音阶段需参考原声再微调)
-        try:
-            import soundfile as sf
-            import io, numpy as np
-            _data, _sr = sf.read(io.BytesIO(wav_data))
-            _th = max(np.max(np.abs(_data)) * 0.003, 1e-4)
-            _non_silent = np.where(np.abs(_data) > _th)[0]
-            if len(_non_silent) > 0:
-                _lead_ms = _non_silent[0] / _sr * 1000
-                if _lead_ms > 180:
-                    _trim_start = int(_non_silent[0] - int(0.15 * _sr))
-                    if _trim_start > 0:
-                        _data = _data[_trim_start:]
-                        _buf = io.BytesIO()
-                        sf.write(_buf, _data, _sr, format="WAV", subtype="PCM_16")
-                        wav_data = _buf.getvalue()
-                        print(f"  [tts] 裁剪前导静音: {_lead_ms:.0f}ms → 150ms")
-        except Exception as _trim_e:
-            print(f"  [tts] 裁剪前导静音失败: {_trim_e}")
-
-        # 时长对齐（仅在 stretch_to_target=True 时拉伸)
         if target_duration_ms is not None and target_duration_ms > 0 and stretch_to_target:
             wav_data = _adjust_duration(wav_data, target_duration_ms, target_chars=len(text))
             print(f"  [tts] 时长对齐到 {target_duration_ms}ms")

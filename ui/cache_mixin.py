@@ -170,6 +170,10 @@ class CacheMixin:
                         has = file_count > 0
             if not has:
                 file_count = 0
+            if k == "mix":
+                # 混音文件(fianl_audio.wav) + 混音片段(mixed_*.wav 在 tts/目录)
+                _mixed = glob.glob(os.path.join(cache_dir, "tts", "mixed_*.wav"))
+                file_count += len(_mixed)
             if has and file_count > 0:
                 cb_text = f"{lbl}  ({file_count} 个文件)"
             elif has:
