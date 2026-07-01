@@ -1793,8 +1793,11 @@ def mix_tts_segment(
             vad_offset_ms=speech_start,
             ref_vad_offset_ms=_ref_vad)
         _adj = _trim_info if isinstance(_trim_info, int) else 0
+        if _ref_vad < 0:
+            raise RuntimeError(f"缺少原声 VAD 数据 (sub {sub.idx})")
+        _speech_start = _ref_vad  # 补白/裁剪后语音已对齐到原声 VAD 偏移
         trim_info = {
-            "speech_start_ms": max(0, speech_start - _ref_vad) if _ref_vad >= 0 else speech_start,
+            "speech_start_ms": _speech_start,
             "leading_trimmed_ms": max(0, _ref_vad - speech_start) if _ref_vad >= 0 else 0,
             "duration_ms": get_audio_info(aligned_path).duration_ms,
             "vad_adjust_ms": _adj,
@@ -2022,43 +2025,35 @@ class AudioMixAndMergeStep(BaseStep):
                 result = f.result()
                 if result is not None:
                     idx, start_ms, end_ms, _tts_dur, _edge_ms, trim_info, vocals_ref, aligned_path, gain_path, _padded_tts = result
-                    # ── raw/tts 日志（mix 行在拼接后统一收集,按 idx 排序输出)──
-                    try:
-                        _t = fmt_time
-
-                        # raw: 字幕区间（id 在前,时长=字幕时长)
-                        _raw_tail = f"时长{(end_ms - start_ms)/1000:.3f}s"
-                        _raw_part1 = f"{idx:>3d} raw: 字幕开始= {_t(start_ms)}"
-                        _raw_part2 = f"字幕结束= {_t(end_ms)}"
-                        _mix_log_buffer.append((
-                            idx, 1,
-                            f"{_raw_part1:<42s}{_raw_part2:<28s}  {_raw_tail}"
-                        ))
-
-                        # tts: 淡入/淡出位置（无 id,时长=TTS 总时长)
-                        _tts_raw = int(trim_info.get('speech_start_ms', 0)) if trim_info else 0
-                        _tts_lead = int(trim_info.get('leading_trimmed_ms', 0)) if trim_info else 0
-                        _tts_speech = max(0, _tts_raw - _tts_lead)  # VAD 修剪后的语音偏移
-                        _fade_in_abs = start_ms + _tts_speech
-                        _fade_out_abs = start_ms + _tts_dur - _tts_lead  # TTS 实际结束位置（VAD 修剪后)
-                        _fade_out_offset = _fade_out_abs - end_ms  # 基于 raw 结束
-                        _tts_tail = f"时长{(_fade_out_abs - _fade_in_abs)/1000:.3f}s"
-                        _tts_part1 = f"    tts: 淡入开始= {_t(_fade_in_abs)}({_tts_speech:+5d}ms)"
-                        _tts_part2 = f"淡出结束= {_t(_fade_out_abs)}({_fade_out_offset:+5d}ms)"
-                        _mix_log_buffer.append((
-                            idx, 2,
-                            f"{_tts_part1:<42s}{_tts_part2:<28s}  {_tts_tail}"
-                        ))
-
-                        # 展开区间由 _build_tts_segments 重建,mix 行在拼接后统一输出
-                        # 实际计算（被 seg_len//4 与相邻片段间距夹断),此处无法预知。
-                    except Exception:
-                        pass
-                    # 前导调整(补白/裁剪)
                     _adj = int(trim_info.get('vad_adjust_ms', 0)) if trim_info else 0
                     if _adj:
                         _adjustments[idx] = _adj
                     _batch_ids.append(idx)
+                    # ── raw/tts 日志（mix 行在拼接后统一收集,按 idx 排序输出)──
+                    try:
+                        _t = fmt_time
+                        _tr = trim_info or {}
+
+                        _raw_tail = f"时长{(end_ms - start_ms)/1000:.3f}s"
+                        _raw_part1 = f"{idx:>3d} raw: 字幕开始= {_t(start_ms)}"
+                        _raw_part2 = f"字幕结束= {_t(end_ms)}"
+                        _mix_log_buffer.append((idx, 1,
+                            f"{_raw_part1:<42s}{_raw_part2:<28s}  {_raw_tail}"))
+
+                        _tts_raw = int(_tr.get('speech_start_ms', 0))
+                        _tts_speech = _tts_raw  # 调整后语音在文件中的实际偏移
+                        _aligned_dur = int(_tr.get('duration_ms', _tts_dur))
+                        _fade_in = start_ms + _tts_speech
+                        _fade_out = start_ms + _aligned_dur
+                        _off = _fade_out - end_ms
+                        _tts_p1 = f"    tts: 淡入开始= {_t(_fade_in)}({_tts_speech:+5d}ms)"
+                        _tts_p2 = f"淡出结束= {_t(_fade_out)}({_off:+5d}ms)"
+                        _tts_tail = f"时长{(_fade_out - _fade_in)/1000:.3f}s"
+                        _mix_log_buffer.append((idx, 2,
+                            f"{_tts_p1:<42s}{_tts_p2:<28s}  {_tts_tail}"))
+
+                    except Exception:
+                        pass
                     # 清理临时文件
                     for tmp in [aligned_path, gain_path, _padded_tts, vocals_ref]:
                         if os.path.exists(tmp):
@@ -2500,11 +2495,10 @@ def regen_single_tts(
         if trim_info:
             from .utils import fmt_time as _t
             _tts_raw = int(trim_info.get('speech_start_ms', 0))
-            _tts_lead = int(trim_info.get('leading_trimmed_ms', 0))
-            _tts_speech = max(0, _tts_raw - _tts_lead)
+            _tts_speech = _tts_raw  # 调整后语音在文件中的实际偏移
             _fade_in_abs = start_ms + _tts_speech
-            _tts_dur = int(trim_info.get('duration_ms', end_ms - start_ms))
-            _fade_out_abs = start_ms + _tts_dur - _tts_lead
+            _aligned_dur = int(trim_info.get('duration_ms', end_ms - start_ms))
+            _fade_out_abs = start_ms + _aligned_dur
             _fade_out_offset = _fade_out_abs - end_ms
             _raw_tail = f"时长{(end_ms - start_ms)/1000:.3f}s"
             _raw_part1 = f"{idx:>3d} raw: 字幕开始= {_t(start_ms)}"
