@@ -1818,7 +1818,8 @@ def mix_tts_segment(
         _vad_thresh = 10 ** (-35 / 20)
         _min_len = min(len(y), len(y_ref))
         if _min_len > 0:
-            yt = y[:_min_len]; yr = y_ref[:_min_len]
+            yt = y[:_min_len]
+            yr = y_ref[:_min_len]
             yt_act = yt[_np.abs(yt) > _vad_thresh]
             yr_act = yr[_np.abs(yr) > _vad_thresh]
             if len(yt_act) > 0 and len(yr_act) > 0:
@@ -1865,9 +1866,11 @@ def mix_tts_segment(
                        check=True, capture_output=True)
                 y, sr = read_wav_np(tmp_out)
             finally:
-                _safe_remove(tmp_in); _safe_remove(tmp_out)
+                _safe_remove(tmp_in)
+                _safe_remove(tmp_out)
         # 长度对齐（以较长方为准)
-        bg_len = len(y_bg); tts_len = len(y)
+        bg_len = len(y_bg)
+        tts_len = len(y)
         if bg_len < tts_len:
             y_bg = _np.concatenate([y_bg, _np.zeros(tts_len - bg_len)])
         elif bg_len > tts_len:
