@@ -3,7 +3,6 @@
 本模块集中存放各模块间重复的工具函数,避免四处复制。
 """
 
-import os
 from typing import Optional
 
 import numpy as np
@@ -45,7 +44,6 @@ def fmt_time_adaptive(ms: int, total_duration_ms: int) -> str:
 
 def read_wav_np(path: str, mono: bool = True):
     """读取 WAV 为 float64 numpy 数组 (默认 mono)"""
-    import numpy as np
     import soundfile as sf
     y, sr = sf.read(path, dtype='float64')
     if mono and y.ndim > 1:
@@ -61,7 +59,6 @@ def write_wav_np(path: str, y, sr: int):
 
 def read_wav_segment(path: str, start_ms: int, end_ms: int = None, mono: bool = True):
     """从 WAV 文件读取指定毫秒区间的音频, 返回 (float64 array, sample_rate)"""
-    import numpy as np
     import soundfile as sf
     with sf.SoundFile(path) as f:
         sr = f.samplerate
@@ -81,7 +78,6 @@ def read_wav_segment(path: str, start_ms: int, end_ms: int = None, mono: bool = 
 
 def downsample_waveform(y, duration_ms: int, target_n: int = 200, max_duration_ms: int = 0) -> list:
     """将音频数据降采样为波形峰值 (用于 UI 显示)"""
-    import numpy as np
     if len(y) == 0:
         return []
     n = min(target_n, len(y))

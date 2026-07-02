@@ -75,9 +75,10 @@ class ExecutionMixin:
             setattr(ctx, k, v)
         ctx.keep_temp = self.keep_temp_cb.isChecked()
         # 说话人嵌入路径来自 UI 当前选择
-        _get_emb = lambda combo: (
-            os.path.join(os.getcwd(), "role", combo.currentText() + ".index.pt")
-            if combo.currentIndex() > 0 else "")
+        def _get_emb(combo):
+            return (
+                    os.path.join(os.getcwd(), "role", combo.currentText() + ".index.pt")
+                    if combo.currentIndex() > 0 else "")
         ctx.speaker_embedding_path_male = _get_emb(
             getattr(self, 'speaker_emb_male', None) or type('o',(),{'currentIndex':lambda:0})())
         ctx.speaker_embedding_path_female = _get_emb(

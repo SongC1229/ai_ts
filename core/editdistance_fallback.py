@@ -1,5 +1,8 @@
 """editdistance 纯 Python 回退 — 当 C 扩展不可用时使用"""
 
+import sys
+import types
+
 
 def eval(s1: str, s2: str) -> int:
     """Levenshtein distance"""
@@ -17,9 +20,7 @@ def eval(s1: str, s2: str) -> int:
 
 
 # ── 注入到 editdistance 模块 ──
-import sys
 if 'editdistance' not in sys.modules:
-    import types
     mod = types.ModuleType('editdistance')
     mod.eval = eval
     mod.distance = eval

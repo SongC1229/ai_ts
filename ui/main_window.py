@@ -932,7 +932,9 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
         self.log(f"训练音色: 从 {len(subs)} 条字幕提取参考音频")
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from core.audio_tools import split_audio_np
-        import tempfile, time, shutil
+        import tempfile
+        import time
+        import shutil
         # 从 pipeline worker 获取 work_dir, 否则用默认路径
         _work_dir = getattr(getattr(self, '_pipeline_worker', None), 'ctx', None)
         if _work_dir:
@@ -972,7 +974,7 @@ class MainWindow(PlaybackMixin, CacheMixin, PipelineMixin, ExecutionMixin, QMain
                 try:
                     f.result()
                     clip_paths.append(os.path.join(tmp_dir, f"clip_{futs[f]:04d}.wav"))
-                except:
+                except Exception:
                     pass
         self.log(f"  音频提取完成: {len(clip_paths)}/{len(subs)} 条, 耗时 {time.time()-t0:.1f}s")
         if not clip_paths:

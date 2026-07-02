@@ -30,7 +30,6 @@ from pathlib import Path
 from PySide6.QtWidgets import QMessageBox
 
 from ui.table_models import SRC_COLUMNS
-from core.cache_manager import Step
 
 _STEP_COUNT_RE = re.compile(r"(\(\d+/\d+\))")
 
@@ -308,9 +307,10 @@ class PipelineMixin:
         for k, v in cfg.__dict__.items():
             setattr(worker.ctx, k, v)
         # 说话人嵌入路径由 UI 当前选择决定
-        _get_emb = lambda combo: (
-            os.path.join(os.getcwd(), "role", combo.currentText() + ".index.pt")
-            if combo.currentIndex() > 0 else "")
+        def _get_emb(combo):
+            return (
+                    os.path.join(os.getcwd(), "role", combo.currentText() + ".index.pt")
+                    if combo.currentIndex() > 0 else "")
         worker.ctx.speaker_embedding_path_male = _get_emb(
             getattr(self, 'speaker_emb_male', None))
         worker.ctx.speaker_embedding_path_female = _get_emb(

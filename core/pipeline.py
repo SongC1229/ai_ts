@@ -25,7 +25,6 @@ import json
 import socket as _socket
 import shutil
 import time
-import traceback
 import subprocess as sp
 import tempfile
 from pathlib import Path
@@ -637,8 +636,10 @@ class SubStep(BaseStep):
         # 清理临时片段文件
         import glob as _glob
         for _p in _glob.glob(os.path.join(ctx.work_dir, "_align_clip_*.wav")):
-            try: os.remove(_p)
-            except: pass
+            try:
+                os.remove(_p)
+            except Exception:
+                pass
 
         # 将校准时间写入目标字幕和原声字幕（原地修改)
         # 仅对成功校准的条目（_aligned, reason=="OK"）写入 calib_ 字段;
@@ -764,7 +765,7 @@ class SubStep(BaseStep):
         if not ctx.vocals_path or not os.path.exists(ctx.vocals_path):
             ctx.log_ui("  无人声文件,跳过 ASR 字幕生成")
             return []
-        import time as _t; _t0 = _t.time()
+        _t0 = time.time()
         try:
             from .aligner_sensevoice import _get_models
             _asr_model, _ = _get_models()
@@ -796,7 +797,7 @@ class SubStep(BaseStep):
             except Exception:
                 entries.append(SubtitleItem(sub.idx, sub.start_ms, sub.end_ms, ""))
         ctx.log_ui(f"  SenseVoice ASR: {len([e for e in entries if e.text])}/{len(entries)} 条, "
-                   f"耗时 {_t.time()-_t0:.1f}s")
+                   f"耗时 {time.time()-_t0:.1f}s")
         return entries
 
     def _do_alignment(self, ctx: PipelineContext, subs) -> bool:
@@ -805,7 +806,7 @@ class SubStep(BaseStep):
 
         if _align_mode == 'whisper':
             _ret = self._run_whisper_align(ctx, subs)
-            from .aligner_whisper import _load_time, _model_name, _model_device
+            from .aligner_whisper import _load_time, _model_device
             if _load_time > 0:
                 ctx.log_ui(f"  faster-whisper-large-v3 {_model_device} float16（load {_load_time:.1f}s）")
             return _ret
@@ -1877,8 +1878,7 @@ class AudioMixAndMergeStep(BaseStep):
 
         self._progress(ctx, 0, "处理音频...")
 
-        import time as _mix_timer
-        _mix_t0 = _mix_timer.time()
+        _mix_t0 = time.time()
         ctx.log_ui("===== 分段混音阶段开始 =====")
         ctx.log_ui(f"  参数: vad_mode={ctx.vad_mode}  edge_ms={ctx.edge_ms}ms  "
                  f"crossfade_ms=40ms  vad_pad_ms={ctx.vad_pad_ms}ms(仅\"字幕对齐\"模式有效)")
@@ -2080,9 +2080,9 @@ class AudioMixAndMergeStep(BaseStep):
                 if ctx.log_file:
                     ctx.log_file(_line)
 
-        ctx.log_ui(f"===== 分段混音阶段完成 ({_mix_timer.time()-_mix_t0:.1f}s) =====")
+        ctx.log_ui(f"===== 分段混音阶段完成 ({time.time()-_mix_t0:.1f}s) =====")
         _build_tts_segments(ctx)
-        _sp_t0 = _mix_timer.time()
+        _sp_t0 = time.time()
 
         # Phase 2: 拼接为全长音频
         self._progress(ctx, 50, "拼接音频...")
@@ -2095,7 +2095,7 @@ class AudioMixAndMergeStep(BaseStep):
         ctx.final_audio_path = final_audio
         if ctx.on_mix_done:
             ctx.on_mix_done(final_audio)
-        ctx.log_ui(f"  splice 拼接: {_mix_timer.time()-_sp_t0:.1f}s")
+        ctx.log_ui(f"  splice 拼接: {time.time()-_sp_t0:.1f}s")
         _n_seg = len(ctx.tts_segments)
         _dur = get_audio_info(final_audio).duration_ms / 1000
         ctx.log_ui(f"  拼接完成: {_n_seg} 段替换, 总长 {_dur:.1f}s")
@@ -2130,7 +2130,7 @@ class AudioMixAndMergeStep(BaseStep):
         for _, _, _line in _mix_log_buffer:
             ctx.log_file(_line)
 
-        ctx.log_ui(f"===== 分段混音阶段完成 ({_mix_timer.time()-_mix_t0:.1f}s) =====")
+        ctx.log_ui(f"===== 分段混音阶段完成 ({time.time()-_mix_t0:.1f}s) =====")
         self.mark_completed(ctx)
         self._progress(ctx, 100, "全长重建完成")
 
@@ -2141,7 +2141,6 @@ def _build_tts_segments(ctx: PipelineContext):
     ctx.tts_segments = []
     _sub_map = {s.idx: s for s in ctx.subs}
     for sub in ctx.subs:
-        idx = sub.idx
         mixed = ctx.cache.mixed_path(sub)
         if os.path.exists(mixed):
             dur = get_audio_info(mixed).duration_ms

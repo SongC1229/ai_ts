@@ -1,24 +1,16 @@
 """IndexTTS 2.0 本地 TTS 引擎 — 单例生命周期管理 + 推理封装
 
 特点:
-  - 输入: 参考音频支持内存 bytes（无需磁盘文件)
+  - 输入: 参考音频文件路径
   - 时长: 支持输出时长与输入音频自动对齐（语音拉伸/压缩)
   - 单例: 复用模型,避免重复加载
   - 显存: 退出时自动释放 GPU 显存
 
 用法:
-    from core.tts_engine import tts_synthesize, unload_tts_engine
+    from core.tts_indextts2 import tts_synthesize, unload_tts_engine
 
-    # 1. 参考音频来自文件
     wav_data = tts_synthesize("你好世界", ref_audio_path="voice.wav")
-
-    # 2. 参考音频来自内存 bytes
-    with open("voice.wav", "rb") as f:
-        ref_bytes = f.read()
-    wav_data = tts_synthesize("你好世界", ref_audio=ref_bytes)
-
-    # 3. 指定目标时长（毫秒)
-    wav_data = tts_synthesize("你好", ref_audio=ref_bytes, target_duration_ms=2000)
+    wav_data = tts_synthesize("你好", ref_audio_path="voice.wav", target_duration_ms=2000)
 
     # 用完释放
     unload_tts_engine()
@@ -302,12 +294,10 @@ def _adjust_duration(
 def tts_synthesize(
     text: str,
     ref_audio_path: Optional[str] = None,
-    ref_audio: Optional[bytes] = None,
     target_duration_ms: Optional[int] = None,
     stretch_to_target: bool = True,       # True=拉伸对齐, False=仅用于 max_mel_tokens 估算
     # 情绪控制参数
     emo_audio_path: Optional[str] = None,
-    emo_audio: Optional[bytes] = None,
     emo_alpha: float = 0.3,
     emo_vector: Optional[list] = None,
     use_emo_text: bool = False,
@@ -323,14 +313,12 @@ def tts_synthesize(
 
     Args:
         text: 待合成文本
-        ref_audio_path: 说话人参考音频文件路径（与 ref_audio 二选一)
-        ref_audio: 说话人参考音频 WAV bytes（与 ref_audio_path 二选一)
+        ref_audio_path: 说话人参考音频文件路径
         target_duration_ms: 可选,目标时长（毫秒)。用于估算 max_mel_tokens
         stretch_to_target: True 则拉伸音频对齐到该时长,False 仅用于生成参数估算
 
-        情绪控制（三选一,优先级: emo_vector > emo_audio > use_emo_text):
+        情绪控制（优先级: emo_vector > emo_audio_path > use_emo_text):
             emo_audio_path: 情绪参考音频文件路径（例如 angry.wav)
-            emo_audio: 情绪参考音频 WAV bytes
             emo_alpha: 情绪 blend 比例 0.0-1.0,1.0=完全按参考情绪
             emo_vector: 8 维情绪向量 [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
             use_emo_text: 是否从文本自动检测情绪
@@ -365,22 +353,21 @@ def tts_synthesize(
     print(f"  [tts] 情绪参考: {emo_audio_path or 'None'}", flush=True)
 
     # ── 确定参考音频路径(仅非 pt 模式需要) ──
-    _temp_ref_path = None
     ref_path = ""
     if _emb_hint:
-        # pt 模式: 不要求 ref_audio,用占位路径确保模型内部不出错
+        # pt 模式: 不要求 ref_audio_path, 但 ref_audio_path 和 emo_audio_path 至少提供一个
+        if not ref_audio_path and not emo_audio_path:
+            print("  [tts] pt 模式下必须提供 ref_audio_path 或 emo_audio_path")
+            return None
         ref_path = ref_audio_path or "__fixed_speaker__"
     else:
-        if ref_audio is not None:
-            _temp_ref_path = _wav_bytes_to_tempfile(ref_audio, work_dir=work_dir)
-            ref_path = _temp_ref_path
-        elif ref_audio_path is not None:
+        if ref_audio_path is not None:
             if not os.path.exists(ref_audio_path):
                 print(f"  [tts] 参考音频不存在: {ref_audio_path}")
                 return None
             ref_path = ref_audio_path
         else:
-            print("  [tts] 必须提供 ref_audio 或 ref_audio_path")
+            print("  [tts] 必须提供 ref_audio_path")
             return None
 
     try:
@@ -413,13 +400,9 @@ def tts_synthesize(
                 model.cache_spk_audio_prompt = ref_path
             generation_kwargs.pop('_emb_path_hint', None)
 
-        # 确定情绪参考音频路径(用于模型显存)
-        _temp_emo_path = None
+        # 确定情绪参考音频路径
         emo_path = None
-        if emo_audio is not None:
-            _temp_emo_path = _wav_bytes_to_tempfile(emo_audio, work_dir=work_dir)
-            emo_path = _temp_emo_path
-        elif emo_audio_path is not None and os.path.exists(emo_audio_path):
+        if emo_audio_path is not None and os.path.exists(emo_audio_path):
             emo_path = emo_audio_path
 
         try:
@@ -486,11 +469,6 @@ def tts_synthesize(
         return None
 
     finally:
-        if _temp_ref_path:
-            try:
-                os.unlink(_temp_ref_path)
-            except Exception:
-                pass
         if 'out_path' in locals() or 'out_path' in dir():
             try:
                 if os.path.exists(out_path):

@@ -734,7 +734,8 @@ def get_rms_db(audio_path: str) -> float:
         return float('-inf')
 
 def align_tts_leading_silence(tts_path, output_path, vad_offset_ms, ref_vad_offset_ms):
-    import shutil, wave
+    import shutil
+    import wave
     if ref_vad_offset_ms < 0 or vad_offset_ms < 0:
         shutil.copy2(tts_path, output_path)
         return output_path, 0
